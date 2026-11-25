@@ -9,6 +9,41 @@ use crate::document::{page_id, Document, RemoteDocument};
 use crate::notion::PageInfo;
 use crate::review::Snapshot;
 
+/// Sled's final background file handle can briefly outlive the last store.
+/// Preserve exclusive locking; wait only for WouldBlock, never other errors.
+fn open_with_retry<T>(mut open: impl FnMut() -> sled::Result<T>) -> sled::Result<T> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(250);
+    loop {
+        match open() {
+            Err(error) if lock_contention(&error) => {
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                if remaining.is_zero() {
+                    return Err(error);
+                }
+                std::thread::sleep(remaining.min(std::time::Duration::from_millis(10)));
+            }
+            result => return result,
+        }
+    }
+}
+
+fn lock_contention(error: &sled::Error) -> bool {
+    let sled::Error::Io(io) = error else {
+        return false;
+    };
+    if io.kind() == std::io::ErrorKind::WouldBlock {
+        return true;
+    }
+    // Sled 0.34.7 config::open_file erases the OS kind into this specific
+    // Other-error wrapper. Do not retry arbitrary Other or permission errors.
+    let message = io.to_string();
+    io.kind() == std::io::ErrorKind::Other
+        && message.starts_with("could not acquire lock on ")
+        && message
+            .rsplit_once(": Os { ")
+            .is_some_and(|(_, os)| os.contains(", kind: WouldBlock, ") && os.ends_with(" }"))
+}
+
 pub struct Store {
     root: PathBuf,
     db: sled::Db,
@@ -92,8 +127,8 @@ impl Store {
     pub fn open(root: &Path) -> Result<Self> {
         fs::create_dir_all(root.join("docs")).context("create document directory")?;
         let root = fs::canonicalize(root).context("resolve workspace")?;
-        let db =
-            sled::open(root.join("store")).context("open sled workspace (one CLI at a time)")?;
+        let db = open_with_retry(|| sled::open(root.join("store")))
+            .context("open sled workspace (one CLI at a time)")?;
         let documents = db.open_tree("documents-v1")?;
         Ok(Self {
             root,
@@ -276,6 +311,65 @@ mod journal_failures {
         journal::State,
         notion::{CreateParent, Notion},
     };
+
+    #[test]
+    fn open_retries_only_lock_contention() {
+        let mut attempts = 0;
+        open_with_retry(|| {
+            attempts += 1;
+            if attempts < 3 {
+                Err(sled::Error::Io(std::io::Error::from(
+                    std::io::ErrorKind::WouldBlock,
+                )))
+            } else {
+                Ok(())
+            }
+        })
+        .unwrap();
+        assert_eq!(attempts, 3);
+        let mut attempts = 0;
+        assert!(open_with_retry::<()>(|| {
+            attempts += 1;
+            Err(sled::Error::Io(std::io::Error::from(
+                std::io::ErrorKind::PermissionDenied,
+            )))
+        })
+        .is_err());
+        assert_eq!(attempts, 1);
+        assert!(lock_contention(&sled::Error::Io(std::io::Error::other("could not acquire lock on \"/tmp/store/db\": Os { code: 11, kind: WouldBlock, message: \"Resource temporarily unavailable\" }"))));
+        assert!(!lock_contention(&sled::Error::Io(std::io::Error::other(
+            "some unrelated WouldBlock message"
+        ))));
+    }
+
+    #[test]
+    fn real_store_reopen_is_reliable_and_second_holder_is_rejected() {
+        let dir = tempfile::TempDir::new().unwrap();
+        for _ in 0..30 {
+            let store = Store::open(dir.path()).unwrap();
+            let op = store
+                .prepare(
+                    crate::journal::Intent::Create {
+                        parent: None,
+                        title: "Notes".into(),
+                        markdown: "body".into(),
+                    },
+                    None,
+                )
+                .unwrap();
+            assert_eq!(
+                store.operation(op.id).unwrap().state,
+                crate::journal::State::Prepared
+            );
+        }
+        let holder = Store::open(dir.path()).unwrap();
+        let start = std::time::Instant::now();
+        assert!(Store::open(dir.path()).is_err());
+        assert!(start.elapsed() >= std::time::Duration::from_millis(250));
+        assert!(start.elapsed() < std::time::Duration::from_secs(2));
+        drop(holder);
+        assert!(Store::open(dir.path()).is_ok());
+    }
 
     #[tokio::test]
     async fn failed_preparation_or_sent_flush_prevents_mutation() {

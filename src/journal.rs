@@ -8,6 +8,22 @@ use crate::{db::Store, document::Document, notion::Notion};
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum Intent {
+    UploadCreate {
+        input: crate::uploads::Blob,
+    },
+    UploadPart {
+        upload: String,
+        input: crate::uploads::Blob,
+        number: u32,
+    },
+    UploadComplete {
+        upload: String,
+    },
+    Attach {
+        page: String,
+        upload: String,
+        name: String,
+    },
     RecordMove {
         id: String,
         source: String,
@@ -94,7 +110,12 @@ impl Operation {
 
     pub fn target(&self) -> Option<&str> {
         self.remote_id.as_deref().or(match &self.intent {
-            Intent::Create { .. } | Intent::Comment { .. } | Intent::RecordCreate { .. } => None,
+            Intent::Create { .. }
+            | Intent::Comment { .. }
+            | Intent::RecordCreate { .. }
+            | Intent::UploadCreate { .. }
+            | Intent::Attach { .. } => None,
+            Intent::UploadPart { upload, .. } | Intent::UploadComplete { upload } => Some(upload),
             Intent::RecordUpdate { id, .. } | Intent::RecordMove { id, .. } => Some(id),
             Intent::Push { document } | Intent::Edit { document, .. } => Some(&document.id),
             Intent::Rename { id, .. } | Intent::Move { id, .. } => Some(id),
@@ -164,6 +185,9 @@ pub async fn recover(store: &Store, notion: &Notion, id: u64) -> Result<Operatio
     let target = op.target().context("creation identity is unknown; inspect Notion manually; recovery will not repeat create")?.to_owned();
     let result = async {
         match &op.intent {
+            Intent::UploadCreate{..}|Intent::UploadPart{..}|Intent::UploadComplete{..}|Intent::Attach{..}=>{
+                crate::uploads::recover_file(store,notion,&mut op,&target).await?;
+            }
             Intent::RecordMove {source,..} => {
                 let info=notion.inspect(&target).await?;
                 ensure!(info.parent.as_ref().and_then(|p|p["data_source_id"].as_str()).and_then(|id|crate::document::page_id(id).ok()).as_deref()==Some(source),"record parent differs from requested source; no move repeated");

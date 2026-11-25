@@ -20,6 +20,8 @@ Retain commands/API/document/db boundaries; add review and typed domain modules
 where growth justifies them. Use tests/workflow.rs and additional focused test
 modules. No initial dependency addition: unified diff uses line-oriented
 prefix/suffix context; JSON output exposes exact snapshots.
+The file workstream adds sha2 for input/download/part checksums and enables
+reqwest multipart for the native upload endpoint. Cargo.lock pins those additions.
 
 Storage remains one locked workspace at a time. Add separate versioned sled trees
 for reconciliation snapshots, operation journal, comments, schemas/properties and

@@ -218,6 +218,27 @@ impl Notion {
         path: &str,
         body: Option<Value>,
     ) -> Result<Value> {
+        self.request_data(method, path, body, None).await
+    }
+
+    pub(crate) async fn send_upload(&self, id: &str, data: &crate::uploads::Part) -> Result<Value> {
+        let id = page_id(id)?;
+        self.request_data(
+            Method::POST,
+            &format!("/file_uploads/{id}/send"),
+            None,
+            Some(data),
+        )
+        .await
+    }
+
+    async fn request_data(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<Value>,
+        upload: Option<&crate::uploads::Part>,
+    ) -> Result<Value> {
         for attempt in 0..=3 {
             {
                 let mut last = self.last_request.lock().await;
@@ -232,6 +253,16 @@ impl Notion {
                 .request(method.clone(), format!("{}{path}", self.base));
             if let Some(body) = &body {
                 request = request.json(body);
+            }
+            if let Some(upload) = upload {
+                let file = reqwest::multipart::Part::bytes(upload.bytes.clone())
+                    .file_name(upload.filename.clone())
+                    .mime_str(&upload.content_type)?;
+                let mut form = reqwest::multipart::Form::new().part("file", file);
+                if let Some(number) = upload.number {
+                    form = form.text("part_number", number.to_string());
+                }
+                request = request.multipart(form);
             }
             let response = request.send().await
                 .with_context(|| format!("Notion {method} failed; write outcome may be uncertain; local baseline preserved"))?;

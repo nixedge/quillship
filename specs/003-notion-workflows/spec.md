@@ -1,6 +1,6 @@
 # Feature specification: Notion document workflows
 
-Branch: 003-notion-workflows | Created: 2026-11-24 | Status: initial review/organisation tranche implemented; later workstreams planned
+Branch: 003-notion-workflows | Created: 2026-11-24 | Status: all seven user stories implemented
 
 Request: plan all identified API and CLI gaps, then work through them. Keep
 specifications generic. Extend the Rust CLI and existing local workspace.

@@ -53,6 +53,9 @@ pub struct Store {
 }
 
 impl Store {
+    pub(crate) fn root(&self) -> &Path {
+        &self.root
+    }
     pub(crate) fn cache_save<T: serde::Serialize>(
         &self,
         tree: &str,

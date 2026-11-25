@@ -172,6 +172,53 @@ changing cursors. Traversal failures, cycles, repeated cursors and limits produc
 exit with partial results. Recursive pull requires one root, saves discovered
 pages using normal conflict preservation, and fails if traversal or any pull fails.
 
+## Files and attachments
+
+```sh
+direnv exec . cargo run -- files list PAGE_UUID --json
+cargo run -- files list PAGE_UUID --offline --json
+direnv exec . cargo run -- files fetch FILE_REF --max-bytes 104857600 --json
+direnv exec . cargo run -- files fetch FILE_REF --external --directory ./downloads --json
+direnv exec . cargo run -- files upload --file report.pdf --content-type application/pdf --json
+cargo run -- files status UPLOAD_UUID --json
+direnv exec . cargo run -- files upload --resume UPLOAD_UUID --file report.pdf --content-type application/pdf --json
+direnv exec . cargo run -- files attach PAGE_UUID --upload UPLOAD_UUID --name report.pdf --json
+```
+
+List scans page covers/icons, file properties and nested media blocks, including
+actual child pages. `--max-blocks` bounds traversal (default 10000). Failed scans
+retain the previous cache; cached references and upload status are readable
+offline. File references use stable owners/slots and an asset digest; signed
+access URLs are kept only in memory. Download refresh refuses changed identities.
+Ordinary page links and database records are not crawled.
+
+Fetch uses an independent client without Notion credentials, requires HTTPS, and
+does not follow redirects. External file objects require `--external`. Expired or
+denied links (401/403/404) refresh once. The default download cap is 100 MiB; stream
+limits also apply when size is unknown. Atomic persistence uses an identity-based
+filename and SHA-256 metadata, never overwrites existing bytes, and leaves no
+partial output after failure. Matching cached bytes can be reused; modified or
+untracked collisions fail. Download filenames cannot contain path separators or
+control characters. Back up downloaded bytes with the complete workspace.
+
+Upload requires explicit content type and a valid filename; Notion's supported
+types and workspace size limits still apply. Exact input bytes are retained under
+`upload-inputs/<sha256>.bin` before sending. Inputs at most 20 MiB use single-part;
+larger inputs use 10 MiB parts, up to 5 GiB. Creation, each part and completion are
+separately journalled, with whole/part checksums and confirmed-part tracking.
+Resume verifies saved input, reuses the returned identity and sends unattempted
+parts. Unknown part/completion outcomes on pending uploads require inspection:
+Notion exposes no per-part inventory, so recovery never blindly retransmits.
+Uploaded state is checked against the retained byte count. A completed upload
+is separate from attaching it to a page.
+
+Attach appends a file block and verifies returned block identity/parent. Remote
+success is retained even if readback fails. Local Markdown and its baseline are
+preserved; pull/reconcile explicitly to incorporate the attachment. Push checks
+the resulting divergence before any body replacement. Recovery observes the
+returned block and never appends it a second time. There is no automatic cleanup
+of cached downloads, input snapshots, completed uploads or journal records.
+
 ## Databases, data sources and records
 
 ```sh
@@ -340,9 +387,8 @@ A later complete pull clears warnings and can upgrade a clean partial document.
 If a partial document has local edits, save them elsewhere before upgrading and
 merge them after the complete pull, following the conflict workflow above.
 
-Existing page titles and supported record properties can be updated. Attachments
-are planned in [`specs/003-notion-workflows`](specs/003-notion-workflows)
-and remain unimplemented. Page deletion, automatic merging and background
+Existing page titles, supported record properties and file attachments are
+implemented. Page deletion, automatic merging and background
 synchronization are outside scope. Search-based discovery is
 eventually consistent and may not return every accessible page immediately; pull
 known page IDs directly when needed. Pull attempts every discovered/requested

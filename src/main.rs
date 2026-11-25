@@ -51,6 +51,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Action {
+    /// Discover/download files or explicitly upload/attach them
+    Files {
+        #[command(subcommand)]
+        command: FileAction,
+    },
     /// Inspect a database container and its explicitly selectable data sources
     Database {
         #[command(subcommand)]
@@ -272,6 +277,58 @@ enum Action {
 }
 
 #[derive(Subcommand)]
+enum FileAction {
+    List {
+        #[arg(value_parser=page_id)]
+        page: String,
+        #[arg(long)]
+        offline: bool,
+        #[arg(long, default_value_t = 10000)]
+        max_blocks: usize,
+        #[arg(long)]
+        json: bool,
+    },
+    Fetch {
+        id: String,
+        #[arg(long)]
+        directory: Option<PathBuf>,
+        #[arg(long, default_value_t = 104857600)]
+        max_bytes: u64,
+        #[arg(long)]
+        external: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    Upload {
+        #[arg(long)]
+        file: PathBuf,
+        #[arg(long)]
+        content_type: String,
+        #[arg(long,value_parser=page_id)]
+        resume: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Inspect a locally tracked upload offline
+    Status {
+        #[arg(value_parser=page_id)]
+        id: String,
+        #[arg(long)]
+        json: bool,
+    },
+    Attach {
+        #[arg(value_parser=page_id)]
+        page: String,
+        #[arg(long,value_parser=page_id)]
+        upload: String,
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum DatabaseAction {
     Inspect {
         #[arg(value_parser=page_id)]
@@ -441,6 +498,70 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let store = Store::open(&cli.workspace)?;
     match cli.command {
+        Action::Files { command } => {
+            let value = match command {
+                FileAction::List {
+                    page,
+                    offline,
+                    max_blocks,
+                    json: _,
+                } => {
+                    let notion = if offline {
+                        None
+                    } else {
+                        Some(Notion::from_env()?)
+                    };
+                    serde_json::to_value(
+                        quillship::files::list(&store, notion.as_ref(), &page, max_blocks).await?,
+                    )?
+                }
+                FileAction::Fetch {
+                    id,
+                    directory,
+                    max_bytes,
+                    external,
+                    json: _,
+                } => serde_json::to_value(
+                    quillship::files::fetch(
+                        &store,
+                        &Notion::from_env()?,
+                        &quillship::files::Downloader::new(false)?,
+                        &id,
+                        directory.as_deref(),
+                        max_bytes,
+                        external,
+                    )
+                    .await?,
+                )?,
+                FileAction::Upload {
+                    file,
+                    content_type,
+                    resume,
+                    json: _,
+                } => serde_json::to_value(
+                    quillship::uploads::upload(
+                        &store,
+                        &Notion::from_env()?,
+                        &file,
+                        &content_type,
+                        resume.as_deref(),
+                    )
+                    .await?,
+                )?,
+                FileAction::Status { id, json: _ } => serde_json::to_value(store.upload(&id)?)?,
+                FileAction::Attach {
+                    page,
+                    upload,
+                    name,
+                    json: _,
+                } => serde_json::to_value(
+                    quillship::uploads::attach(&store, &Notion::from_env()?, &page, &upload, &name)
+                        .await?,
+                )?,
+            };
+            println!("{}", serde_json::to_string_pretty(&value)?);
+            Ok(())
+        }
         Action::Database {
             command:
                 DatabaseAction::Inspect {

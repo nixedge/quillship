@@ -22,7 +22,7 @@ Prefer a small library plus CLI over extra services. Network operations must be
 explicit: pull, push, create, inspect, rename, move, tree, diff --remote and
 reconcile with a fresh remote baseline, recover (observation only), and comments
 pull/add, append, replace, database/source inspection, source query and record
-properties/create/update. Offline review and cached inspection
+properties/create/update/move, and files list/fetch/upload/attach. Offline review and cached inspection
 require no credentials. Existing body changes require an explicit push, append
 or targeted replace command;
 new pages require an explicit create or record create command. Creation stores the authored body
@@ -36,10 +36,14 @@ identities/outcomes are flushed before dependent local saving. Recovery observes
 remote state without resubmitting writes. Batch entries retain unattempted inputs.
 Do not execute live writes as tests. Report failures and ask before changing the
 agreed approach. Update task completion and document limitations honestly.
+Download transport has no Notion credentials and uses bounds and atomic
+no-clobber persistence. File access URLs are refreshed rather than retained as
+durable references. Upload inputs/parts are journalled; unknown part outcomes
+never cause automatic retransmission. Attaching does not rebase Markdown bodies.
 
 ## Governance
 
 Amend this constitution deliberately with the corresponding specification and
 validation changes. User instructions take precedence.
 
-Version: 1.6.0 | Ratified: 2026-11-24 | Last amended: 2026-11-25
+Version: 1.7.0 | Ratified: 2026-11-24 | Last amended: 2026-11-25

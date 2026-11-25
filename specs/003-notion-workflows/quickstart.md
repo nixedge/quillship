@@ -28,5 +28,7 @@ or resolve the reported access problem before assuming coverage is complete.
 
 Run `nix develop -c cargo test`, `nix develop -c cargo fmt --check`, and
 `nix develop -c cargo clippy --all-targets -- -D warnings` for mock-only validation.
-Later journal/comment/edit/data-source/file commands are described in workstreams
-and are not yet executable.
+Journal, comments, targeted edits, data sources and files are implemented; use the
+README command examples and workstreams for their contracts and documented limits.
+The current complete workflow is validated with temporary workspaces/mock servers;
+no live writes are performed by tests.

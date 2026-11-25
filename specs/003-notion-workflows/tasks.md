@@ -43,14 +43,14 @@ Execute in order. Later tasks remain open until implemented and tested.
 - [x] T028 [US6] Test unsupported/read-only properties, explicit clearing, limits and concurrent change preservation.
 
 ## Attachments
-- [ ] T029 [US7] Add file/block/property discovery and stable identity metadata.
-- [ ] T030 [US7] Add bounded download/refresh with no token forwarding and safe local paths.
-- [ ] T031 [US7] Add journalled upload completion and explicit attachment.
-- [ ] T032 [US7] Test expired URLs, redirects, partial downloads, multipart failures and restart recovery.
+- [x] T029 [US7] Add file/block/property discovery and stable identity metadata.
+- [x] T030 [US7] Add bounded download/refresh with no token forwarding and safe local paths.
+- [x] T031 [US7] Add journalled upload completion and explicit attachment.
+- [x] T032 [US7] Test expired URLs, redirects, partial downloads, multipart failures and restart recovery.
 
 ## Completion
-- [x] T033 Update README/quickstart and constitution for the initial tranche; repeat for later tranches.
-- [x] T034 Run full Nix validation for completed changes and generic-spec checks; repeat for later tranches.
+- [x] T033 Update README/quickstart, data model and constitution for all completed workstreams.
+- [x] T034 Run full Nix validation and generic-spec checks for all completed workstreams.
 
 Initial validation: 46 tests passed (30 existing, 16 added), cargo fmt --check and
 strict all-target Clippy passed through nix develop. git diff --check and generic
@@ -69,4 +69,11 @@ Structured records: 83 tests pass, with fmt and strict all-target Clippy. Covera
 includes multiple sources, schema drift, property pagination/cache preservation,
 explicit clearing, selected-column conflicts, unrelated changes, body preservation,
 capped/limited queries, journalled record creation/update/recovery and source moves.
-Next: T029.
+Final attachment validation: 94 tests pass through nix develop; formatting,
+strict all-target Clippy, git diff --check and generic-spec checks pass. Coverage
+includes nested media/covers/properties, unsigned download transport, expired link
+refresh, redirects, byte limits, path collisions, truncated streams, input tamper
+detection, single/multipart uploads, retained parts, restart without recreation,
+and attachment readback recovery without reappend. No live Notion writes.
+All planned tasks complete; supported scope and API recovery limitations are in
+README and workstreams. Each workstream is committed separately.

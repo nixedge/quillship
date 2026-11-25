@@ -18,8 +18,11 @@
 
 ## Scope and workflow
 
-Prefer a small library plus CLI over extra services. Explicit pull and push are
-the only network operations. Changes to Notion require an explicit push command.
+Prefer a small library plus CLI over extra services. Explicit pull, push and create
+are the only network operations. Existing body changes require an explicit push;
+new pages require an explicit create command. Creation stores the authored body
+and returned baseline, and reports a successful remote identity before fallible
+readback/persistence. Never repeat an uncertain creation automatically.
 Do not execute live writes as tests. Report failures and ask before changing the
 agreed approach. Update task completion and document limitations honestly.
 
@@ -28,4 +31,4 @@ agreed approach. Update task completion and document limitations honestly.
 Amend this constitution deliberately with the corresponding specification and
 validation changes. User instructions take precedence.
 
-Version: 1.0.0 | Ratified: 2026-11-24 | Last amended: 2026-11-24
+Version: 1.1.0 | Ratified: 2026-11-24 | Last amended: 2026-11-24

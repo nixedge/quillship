@@ -8,7 +8,30 @@ use anyhow::{ensure, Context, Result};
 
 use crate::db::Store;
 use crate::document::{page_id, Document};
-use crate::notion::Notion;
+use crate::notion::{CreateParent, Notion};
+
+pub async fn create_document(
+    store: &Store,
+    notion: &Notion,
+    parent: &CreateParent,
+    title: &str,
+    markdown: &str,
+) -> Result<Document> {
+    let created = notion.create(parent, title, markdown).await?;
+    // Report identity before any readback or persistence operation can fail.
+    eprintln!("created {} {}", created.id, created.url);
+    let persist = async {
+        let remote = notion.retrieve_for_pull(&created.id).await?;
+        let mut doc = Document::from_remote(remote);
+        doc.markdown = markdown.to_owned();
+        store.save(&doc, None)?;
+        Ok::<_, anyhow::Error>(doc)
+    };
+    persist.await.with_context(|| format!(
+        "page {} exists at {}, but local save/readback failed; preserve the input and pull this UUID; do not repeat create",
+        created.id, created.url
+    ))
+}
 
 #[derive(Debug, Default)]
 pub struct PullReport {
@@ -145,17 +168,21 @@ pub async fn push_document(store: &Store, notion: &Notion, doc: &Document) -> Re
     store.save(&next, Some(&current))
 }
 
-pub fn edit_file(store: &Store, id: &str, source: &Path) -> Result<()> {
-    let previous = store.get(id)?;
-    let markdown = if source == Path::new("-") {
+pub fn read_markdown(source: &Path) -> Result<String> {
+    if source == Path::new("-") {
         let mut content = String::new();
         io::stdin()
             .read_to_string(&mut content)
             .context("read Markdown from stdin")?;
-        content
+        Ok(content)
     } else {
-        fs::read_to_string(source).context("read Markdown input file")?
-    };
+        fs::read_to_string(source).context("read Markdown input file")
+    }
+}
+
+pub fn edit_file(store: &Store, id: &str, source: &Path) -> Result<()> {
+    let previous = store.get(id)?;
+    let markdown = read_markdown(source)?;
     let mut next = previous.clone();
     next.markdown = markdown;
     store.save(&next, Some(&previous))

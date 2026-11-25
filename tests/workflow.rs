@@ -9,7 +9,7 @@ use quillship::{
     commands,
     db::Store,
     document::{page_id, Document, RemoteDocument},
-    notion::{Notion, API_VERSION},
+    notion::{validate_create, CreateParent, Notion, API_VERSION},
 };
 use serde_json::{json, Value};
 use tempfile::TempDir;
@@ -580,4 +580,248 @@ async fn warning_after_write_does_not_advance_baseline() {
         .to_string()
         .contains("warnings"));
     assert_eq!(store.get(ID).unwrap(), doc);
+}
+
+async fn create_response(server: &MockServer, parent: Value, body: &str) {
+    Mock::given(method("POST"))
+        .and(path("/v1/pages"))
+        .and(header("authorization", "Bearer test-token"))
+        .and(header("Notion-Version", API_VERSION))
+        .and(body_json(json!({
+            "parent": parent,
+            "properties": {"title": {"title": [{"type": "text", "text": {"content": "Budget λ"}}]}},
+            "markdown": body, "markdown_version": "v2", "allow_async": false,
+            "notifications": {"mode": "silent"}
+        })))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(metadata("2026-11-24T10:00:00.000Z")),
+        )
+        .expect(1)
+        .mount(server)
+        .await;
+}
+
+#[tokio::test]
+async fn create_workspace_preserves_authored_body_and_remote_baseline() {
+    let server = MockServer::start().await;
+    let authored = "**Budget λ**\n";
+    create_response(&server, json!({"workspace": true}), authored).await;
+    snapshot(&server, "<b>Budget λ</b>", 1).await;
+    let dir = TempDir::new().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let doc = commands::create_document(
+        &store,
+        &client(&server),
+        &CreateParent::Workspace,
+        "Budget λ",
+        authored,
+    )
+    .await
+    .unwrap();
+    assert_eq!(doc.id, ID);
+    assert_eq!(doc.markdown, authored);
+    assert_eq!(doc.baseline, "<b>Budget λ</b>");
+    assert!(doc.dirty());
+    assert!(!doc.incomplete);
+    drop(store);
+    assert_eq!(Store::open(dir.path()).unwrap().get(ID).unwrap(), doc);
+}
+
+#[tokio::test]
+async fn create_child_canonicalizes_parent_and_supports_empty_body() {
+    let server = MockServer::start().await;
+    create_response(&server, json!({"page_id": OTHER}), "").await;
+    snapshot(&server, "", 1).await;
+    let dir = TempDir::new().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let doc = commands::create_document(
+        &store,
+        &client(&server),
+        &CreateParent::Page(OTHER.replace('-', "")),
+        "Budget λ",
+        "",
+    )
+    .await
+    .unwrap();
+    assert!(!doc.dirty());
+    assert_eq!(store.get(ID).unwrap().markdown, "");
+}
+
+#[tokio::test]
+async fn failed_create_does_not_retry_or_save_any_document() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/pages"))
+        .respond_with(ResponseTemplate::new(503))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let dir = TempDir::new().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let error = commands::create_document(
+        &store,
+        &client(&server),
+        &CreateParent::Workspace,
+        "Budget λ",
+        "Draft",
+    )
+    .await
+    .unwrap_err();
+    assert!(format!("{error:#}").contains("inspect Notion before repeating create"));
+    assert!(store.all().unwrap().is_empty());
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn created_page_identity_survives_failed_readback() {
+    let server = MockServer::start().await;
+    create_response(&server, json!({"workspace": true}), "Draft").await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(403))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let dir = TempDir::new().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let error = commands::create_document(
+        &store,
+        &client(&server),
+        &CreateParent::Workspace,
+        "Budget λ",
+        "Draft",
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains(ID));
+    assert!(error.contains(&format!("https://www.notion.so/{ID}")));
+    assert!(error.contains("do not repeat create"));
+    assert!(store.all().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn create_identity_collision_preserves_existing_local_edits() {
+    let server = MockServer::start().await;
+    create_response(&server, json!({"workspace": true}), "New body").await;
+    snapshot(&server, "New body", 1).await;
+    let (_dir, store) = workspace("Old baseline");
+    let previous = edit(&store, "Unpushed work");
+    let error = commands::create_document(
+        &store,
+        &client(&server),
+        &CreateParent::Workspace,
+        "Budget λ",
+        "New body",
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains(ID));
+    assert!(error.contains("do not repeat create"));
+    assert_eq!(store.get(ID).unwrap(), previous);
+}
+
+#[tokio::test]
+async fn create_partial_readback_retains_input_and_blocks_push() {
+    let server = MockServer::start().await;
+    create_response(&server, json!({"workspace": true}), "Full authored body").await;
+    Mock::given(method("GET"))
+        .and(path(format!("/v1/pages/{ID}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(metadata("same")))
+        .expect(2)
+        .mount(&server)
+        .await;
+    let mut partial = markdown("Partial body");
+    partial["truncated"] = json!(true);
+    Mock::given(method("GET"))
+        .and(path(format!("/v1/pages/{ID}/markdown")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(partial))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let dir = TempDir::new().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let doc = commands::create_document(
+        &store,
+        &client(&server),
+        &CreateParent::Workspace,
+        "Budget λ",
+        "Full authored body",
+    )
+    .await
+    .unwrap();
+    assert_eq!(doc.markdown, "Full authored body");
+    assert!(doc.incomplete);
+    assert!(commands::push_document(&store, &client(&server), &doc)
+        .await
+        .is_err());
+    assert_eq!(server.received_requests().await.unwrap().len(), 4);
+}
+
+#[test]
+fn create_rejects_invalid_inputs_and_requires_one_parent_mode() {
+    assert!(validate_create(&CreateParent::Workspace, " ", "").is_err());
+    assert!(validate_create(&CreateParent::Workspace, &"λ".repeat(2001), "").is_err());
+    assert!(validate_create(&CreateParent::Page("../bad".into()), "Title", "").is_err());
+    assert!(validate_create(&CreateParent::Workspace, "Title", "<unknown />").is_err());
+    assert!(validate_create(&CreateParent::Workspace, &"λ".repeat(2000), "").is_ok());
+    let dir = TempDir::new().unwrap();
+    let file = dir.path().join("input.md");
+    fs::write(&file, "Draft").unwrap();
+    let file = file.to_str().unwrap();
+    assert!(!cli(&dir, &["create", "--title", "Budget", "--file", file])
+        .status
+        .success());
+    assert!(!cli(
+        &dir,
+        &[
+            "create",
+            "--title",
+            "Budget",
+            "--file",
+            file,
+            "--workspace-root",
+            "--parent",
+            OTHER
+        ]
+    )
+    .status
+    .success());
+    let missing = cli(
+        &dir,
+        &[
+            "create",
+            "--title",
+            "Budget",
+            "--workspace-root",
+            "--file",
+            "/nonexistent/quillship-source.md",
+        ],
+    );
+    assert!(String::from_utf8(missing.stderr)
+        .unwrap()
+        .contains("read Markdown input file"));
+    let empty = cli(
+        &dir,
+        &["create", "--title", "", "--workspace-root", "--file", file],
+    );
+    assert!(String::from_utf8(empty.stderr)
+        .unwrap()
+        .contains("title must not be empty"));
+}
+
+#[tokio::test]
+async fn malformed_creation_response_is_not_retried() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"object": "page"})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let error = client(&server)
+        .create(&CreateParent::Workspace, "Title", "")
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("page may exist"));
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
 }

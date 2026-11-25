@@ -9,7 +9,7 @@ use quillship::{
     commands,
     db::Store,
     document::{page_id, Document},
-    notion::Notion,
+    notion::{validate_create, CreateParent, Notion},
 };
 
 #[derive(Parser)]
@@ -29,6 +29,22 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Action {
+    /// Create one Notion page and save its Markdown working copy
+    Create {
+        #[arg(long)]
+        title: String,
+        /// Existing parent page UUID
+        #[arg(long, value_parser = page_id, conflicts_with = "workspace_root", required_unless_present = "workspace_root")]
+        parent: Option<String>,
+        /// Create a private workspace-level page (requires an eligible connection)
+        #[arg(long, conflicts_with = "parent", required_unless_present = "parent")]
+        workspace_root: bool,
+        /// UTF-8 Markdown input file; - reads stdin
+        #[arg(long)]
+        file: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
     /// Pull page UUIDs, or discover accessible pages (optionally by title)
     Pull {
         #[arg(value_parser = page_id)]
@@ -121,6 +137,49 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let store = Store::open(&cli.workspace)?;
     match cli.command {
+        Action::Create {
+            title,
+            parent,
+            workspace_root: _,
+            file,
+            json: as_json,
+        } => {
+            let parent = parent
+                .map(CreateParent::Page)
+                .unwrap_or(CreateParent::Workspace);
+            let markdown = commands::read_markdown(&file)?;
+            validate_create(&parent, &title, &markdown)?;
+            let doc =
+                commands::create_document(&store, &Notion::from_env()?, &parent, &title, &markdown)
+                    .await?;
+            if as_json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!({
+                        "id": doc.id, "title": doc.title, "url": doc.url,
+                        "path": store.path(&doc.id)?, "dirty": doc.dirty(),
+                        "incomplete": doc.incomplete, "sync_warnings": doc.sync_warnings
+                    }))?
+                );
+            } else {
+                println!(
+                    "created {}\t{}\t{}",
+                    doc.id,
+                    doc.url,
+                    store.path(&doc.id)?.display()
+                );
+            }
+            if doc.dirty() {
+                eprintln!("Notion normalized the submitted Markdown; exact input retained; local document remains modified");
+            }
+            if doc.incomplete {
+                eprintln!(
+                    "warning: {}; pushing disabled",
+                    doc.sync_warnings.join("; ")
+                );
+            }
+            Ok(())
+        }
         Action::Pull { ids, query } => {
             let report =
                 commands::pull(&store, &Notion::from_env()?, &ids, query.as_deref()).await?;

@@ -11,6 +11,34 @@ use crate::document::{page_id, RemoteDocument};
 
 pub const API_VERSION: &str = "2026-03-11";
 
+pub enum CreateParent {
+    Workspace,
+    Page(String),
+}
+
+#[derive(Debug)]
+pub struct CreatedPage {
+    pub id: String,
+    pub url: String,
+}
+
+/// Validate authoring inputs before constructing a client or sending a request.
+pub fn validate_create(parent: &CreateParent, title: &str, markdown: &str) -> Result<()> {
+    ensure!(!title.trim().is_empty(), "page title must not be empty");
+    ensure!(
+        title.chars().count() <= 2000,
+        "page title exceeds 2000 characters"
+    );
+    if let CreateParent::Page(id) = parent {
+        page_id(id)?;
+    }
+    ensure!(
+        !markdown.contains("<unknown"),
+        "cannot create unsupported/unknown block placeholders"
+    );
+    Ok(())
+}
+
 pub struct Notion {
     client: Client,
     base: String,
@@ -105,7 +133,7 @@ impl Markdown {
 impl Notion {
     pub fn from_env() -> Result<Self> {
         Self::new(
-            &std::env::var("NOTION_TOKEN").context("set NOTION_TOKEN for pull/push")?,
+            &std::env::var("NOTION_TOKEN").context("set NOTION_TOKEN for pull/push/create")?,
             "https://api.notion.com/v1",
         )
     }
@@ -224,6 +252,47 @@ impl Notion {
             cursor = Some(next);
         }
         Ok(ids)
+    }
+
+    /// Create exactly one page. Never repeat a write after an ambiguous outcome.
+    pub async fn create(
+        &self,
+        parent: &CreateParent,
+        title: &str,
+        markdown: &str,
+    ) -> Result<CreatedPage> {
+        validate_create(parent, title, markdown)?;
+        let parent = match parent {
+            CreateParent::Workspace => json!({"workspace": true}),
+            CreateParent::Page(id) => json!({"page_id": page_id(id)?}),
+        };
+        let value = self
+            .request(
+                Method::POST,
+                "/pages",
+                Some(json!({
+                    "parent": parent,
+                    "properties": {"title": {"title": [{"type": "text", "text": {"content": title}}]}},
+                    "markdown": markdown, "markdown_version": "v2", "allow_async": false,
+                    "notifications": {"mode": "silent"}
+                })),
+            )
+            .await
+            .context("page creation failed; outcome may be uncertain; inspect Notion before repeating create")?;
+        let identity = || -> Result<CreatedPage> {
+            ensure!(value["object"] == "page", "creation response is not a page");
+            Ok(CreatedPage {
+                id: page_id(value["id"].as_str().context("created page missing UUID")?)?,
+                url: value["url"]
+                    .as_str()
+                    .filter(|url| !url.is_empty())
+                    .context("created page missing URL")?
+                    .to_owned(),
+            })
+        };
+        identity().context(
+            "invalid creation response; page may exist; inspect Notion before repeating create",
+        )
     }
 
     async fn metadata(&self, id: &str) -> Result<Page> {

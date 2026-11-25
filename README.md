@@ -61,6 +61,44 @@ cargo run -- push --dry-run
 cargo run -- push PAGE_UUID
 ```
 
+## Create a page
+
+Create a private workspace-level hub, or a child beneath an accessible page:
+
+```sh
+direnv exec . cargo run -- create --workspace-root \
+  --title 'Project proposal' --file proposal.md --json
+direnv exec . cargo run -- create --parent PAGE_UUID \
+  --title 'Funding and accountability' --file funding.md --json
+cat proposal.md | direnv exec . cargo run -- create --workspace-root \
+  --title 'Proposal draft' --file -
+```
+
+Use exactly one of `--workspace-root` and `--parent`. Notion requires insert
+content capability. Workspace-level private pages require an eligible public or
+user-backed connection; internal integrations need an accessible parent page.
+Titles are explicit, so keep the title out of the Markdown body if duplication
+is unwanted. Native Notion Markdown v2 is used, with silent notifications.
+
+The created UUID and URL are reported immediately on stderr. On success, the
+page is saved in sled and `docs/<uuid>.md`, ready for normal view/edit/push.
+`--json` emits id, title, url, working-file path, dirty/incomplete flags and
+warnings on stdout. Exact input is retained; Notion's readback becomes the
+baseline. Normalized input remains modified, and incomplete readbacks block push.
+
+Creation is a live write. Repeating it can create duplicates. Transport errors,
+invalid responses and 5xx failures are never automatically retried; inspect
+Notion before repeating an uncertain create. Only explicit 429s use bounded
+retries. If remote creation succeeds but readback/local saving fails, recover
+using the reported UUID with `pull`; preserve your input for merging afterwards.
+Existing local pages and untracked files are never overwritten on identity
+collision. Automated tests use local mock servers and create no live pages.
+
+The operation record motivating this command is in
+[`specs/002-notion-page-create/curl-audit.md`](specs/002-notion-page-create/curl-audit.md).
+
+## Local workspace
+
 `edit` uses `$VISUAL`, falling back to `$EDITOR`; quoted editor arguments are
 supported, without shell evaluation. A failed editor leaves its file available.
 `view` prints the exact body to stdout, suitable for piping or redirecting.
@@ -122,8 +160,8 @@ A later complete pull clears warnings and can upgrade a clean partial document.
 If a partial document has local edits, save them elsewhere before upgrading and
 merge them after the complete pull, following the conflict workflow above.
 
-This first release edits bodies of existing pages. Titles/properties are read-only;
-page creation/deletion, database queries, attachment downloads, automatic merging
+Existing page titles/properties are read-only; creation sets the initial title.
+Page deletion, database queries, attachment downloads, automatic merging
 and background synchronization are outside its scope. Search-based discovery is
 eventually consistent and may not return every accessible page immediately; pull
 known page IDs directly when needed. Pull attempts every discovered/requested

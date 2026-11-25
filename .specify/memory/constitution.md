@@ -18,11 +18,16 @@
 
 ## Scope and workflow
 
-Prefer a small library plus CLI over extra services. Explicit pull, push and create
-are the only network operations. Existing body changes require an explicit push;
+Prefer a small library plus CLI over extra services. Network operations must be
+explicit: pull, push, create, inspect, rename, move, tree, diff --remote and
+reconcile with a fresh remote baseline. Offline review and cached inspection
+require no credentials. Existing body changes require an explicit push;
 new pages require an explicit create command. Creation stores the authored body
 and returned baseline, and reports a successful remote identity before fallible
 readback/persistence. Never repeat an uncertain creation automatically.
+Reconciliation archives the original local body, baseline, any fetched remote
+body and selected result durably before changing local content. Metadata changes
+preserve body baselines. Bounded traversal reports incomplete discovery.
 Do not execute live writes as tests. Report failures and ask before changing the
 agreed approach. Update task completion and document limitations honestly.
 
@@ -31,4 +36,4 @@ agreed approach. Update task completion and document limitations honestly.
 Amend this constitution deliberately with the corresponding specification and
 validation changes. User instructions take precedence.
 
-Version: 1.1.0 | Ratified: 2026-11-24 | Last amended: 2026-11-24
+Version: 1.2.0 | Ratified: 2026-11-24 | Last amended: 2026-11-24

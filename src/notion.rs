@@ -1,9 +1,9 @@
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, ensure, Context, Result};
 use reqwest::{header, Client, Method, StatusCode};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::sync::Mutex;
 
@@ -52,11 +52,55 @@ struct Page {
     last_edited_time: String,
     properties: Value,
     #[serde(default)]
+    parent: Option<Value>,
+    #[serde(default)]
     archived: bool,
     #[serde(default)]
     in_trash: bool,
     #[serde(default)]
     is_archived: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct PageInfo {
+    pub id: String,
+    pub title: String,
+    pub url: String,
+    pub last_edited_time: String,
+    pub parent: Option<Value>,
+    pub archived: bool,
+    pub in_trash: bool,
+}
+
+impl Page {
+    fn info(&self) -> Result<PageInfo> {
+        Ok(PageInfo {
+            id: page_id(&self.id)?,
+            title: self.title(),
+            url: self.url.clone(),
+            last_edited_time: self.last_edited_time.clone(),
+            parent: self.parent.clone(),
+            archived: self.archived || self.is_archived,
+            in_trash: self.in_trash,
+        })
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct TreePage {
+    pub id: String,
+    pub title: String,
+    pub parent_id: Option<String>,
+    pub depth: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TreeReport {
+    pub pages: Vec<TreePage>,
+    pub failures: Vec<(String, String)>,
+    pub truncated: bool,
+    pub blocks_scanned: usize,
+    pub requests: usize,
 }
 
 impl Page {
@@ -133,7 +177,7 @@ impl Markdown {
 impl Notion {
     pub fn from_env() -> Result<Self> {
         Self::new(
-            &std::env::var("NOTION_TOKEN").context("set NOTION_TOKEN for pull/push/create")?,
+            &std::env::var("NOTION_TOKEN").context("set NOTION_TOKEN for network commands")?,
             "https://api.notion.com/v1",
         )
     }
@@ -309,6 +353,196 @@ impl Notion {
             "page {id} is archived or trashed"
         );
         Ok(page)
+    }
+
+    pub async fn inspect(&self, id: &str) -> Result<PageInfo> {
+        let id = page_id(id)?;
+        let page: Page = serde_json::from_value(
+            self.request(Method::GET, &format!("/pages/{id}"), None)
+                .await?,
+        )?;
+        ensure!(
+            page_id(&page.id)? == id,
+            "Notion returned unexpected page identity"
+        );
+        page.info()
+    }
+
+    pub async fn rename(&self, id: &str, title: &str) -> Result<PageInfo> {
+        let id = page_id(id)?;
+        validate_create(&CreateParent::Page(id.clone()), title, "")?;
+        let before = self.metadata(&id).await?;
+        let key = before
+            .properties
+            .as_object()
+            .context("missing page properties")?
+            .iter()
+            .find(|(_, v)| v.get("title").is_some())
+            .map(|(k, _)| k.clone())
+            .context("page has no title property")?;
+        let page: Page = serde_json::from_value(self.request(Method::PATCH, &format!("/pages/{id}"),
+            Some(json!({"properties": {(key): {"title": [{"type": "text", "text": {"content": title}}]}}}))).await?)?;
+        ensure!(
+            page_id(&page.id)? == id,
+            "rename response identity mismatch; inspect before retrying"
+        );
+        page.info()
+    }
+
+    pub async fn move_page(&self, id: &str, parent: &str) -> Result<PageInfo> {
+        let id = page_id(id)?;
+        let parent = page_id(parent)?;
+        ensure!(id != parent, "a page cannot be its own parent");
+        let page: Page = serde_json::from_value(
+            self.request(
+                Method::POST,
+                &format!("/pages/{id}/move"),
+                Some(json!({"parent": {"type": "page_id", "page_id": parent}})),
+            )
+            .await?,
+        )?;
+        ensure!(
+            page_id(&page.id)? == id,
+            "move response identity mismatch; inspect before retrying"
+        );
+        page.info()
+    }
+
+    /// Traverse actual child pages, including those inside container blocks.
+    pub async fn tree(&self, id: &str, max_depth: usize, max_blocks: usize) -> Result<TreeReport> {
+        ensure!(max_blocks > 0, "max-blocks must be positive");
+        let root = self.inspect(id).await?;
+        let mut report = TreeReport {
+            pages: vec![TreePage {
+                id: root.id.clone(),
+                title: root.title,
+                parent_id: None,
+                depth: 0,
+            }],
+            failures: Vec::new(),
+            truncated: false,
+            blocks_scanned: 0,
+            requests: 0,
+        };
+        let mut queue = VecDeque::from([(root.id.clone(), root.id.clone(), 0)]);
+        let mut containers = HashSet::new();
+        let mut pages = HashSet::from([root.id]);
+        while let Some((container, owner, depth)) = queue.pop_front() {
+            if !containers.insert(container.clone()) {
+                report
+                    .failures
+                    .push((container, "cycle or duplicate container".into()));
+                continue;
+            }
+            let mut cursor = None::<String>;
+            let mut cursors = HashSet::new();
+            loop {
+                if report.blocks_scanned == max_blocks || report.requests == max_blocks {
+                    report.truncated = true;
+                    break;
+                }
+                let limit = (max_blocks - report.blocks_scanned).min(100);
+                let mut url = reqwest::Url::parse(&format!(
+                    "https://api.notion.com/blocks/{container}/children"
+                ))?;
+                url.query_pairs_mut()
+                    .append_pair("page_size", &limit.to_string());
+                if let Some(cursor) = &cursor {
+                    url.query_pairs_mut().append_pair("start_cursor", cursor);
+                }
+                let path = format!("{}?{}", url.path(), url.query().unwrap_or_default());
+                // Also bound empty pages with ever-changing cursors.
+                report.requests += 1;
+                let result = async {
+                    let value = self.request(Method::GET, &path, None).await?;
+                    let results = value["results"]
+                        .as_array()
+                        .context("missing block results")?;
+                    ensure!(
+                        results.len() <= limit,
+                        "block response exceeds requested limit"
+                    );
+                    let more = value["has_more"]
+                        .as_bool()
+                        .context("missing block pagination flag")?;
+                    let next = if more {
+                        Some(
+                            value["next_cursor"]
+                                .as_str()
+                                .filter(|s| !s.is_empty())
+                                .context("missing next block cursor")?
+                                .to_owned(),
+                        )
+                    } else {
+                        None
+                    };
+                    Ok::<_, anyhow::Error>((results.clone(), next))
+                }
+                .await;
+                let (blocks, next) = match result {
+                    Ok(result) => result,
+                    Err(e) => {
+                        report.failures.push((container.clone(), format!("{e:#}")));
+                        break;
+                    }
+                };
+                report.blocks_scanned += blocks.len();
+                for block in blocks {
+                    let Some(raw_id) = block["id"].as_str() else {
+                        report
+                            .failures
+                            .push((container.clone(), "block missing UUID".into()));
+                        continue;
+                    };
+                    let block_id = match page_id(raw_id) {
+                        Ok(id) => id,
+                        Err(e) => {
+                            report.failures.push((container.clone(), e.to_string()));
+                            continue;
+                        }
+                    };
+                    if block["type"] == "child_page" {
+                        if depth >= max_depth {
+                            report.truncated = true;
+                            continue;
+                        }
+                        if !pages.insert(block_id.clone()) {
+                            report
+                                .failures
+                                .push((block_id, "cycle or duplicate child page".into()));
+                            continue;
+                        }
+                        report.pages.push(TreePage {
+                            id: block_id.clone(),
+                            title: block["child_page"]["title"]
+                                .as_str()
+                                .unwrap_or_default()
+                                .to_owned(),
+                            parent_id: Some(owner.clone()),
+                            depth: depth + 1,
+                        });
+                        queue.push_back((block_id.clone(), block_id, depth + 1));
+                    } else if block["type"] != "child_database" && block["has_children"] == true {
+                        queue.push_back((block_id, owner.clone(), depth));
+                    }
+                }
+                match next {
+                    Some(next) if cursors.insert(next.clone()) => cursor = Some(next),
+                    Some(_) => {
+                        report
+                            .failures
+                            .push((container.clone(), "repeated block cursor".into()));
+                        break;
+                    }
+                    None => break,
+                }
+            }
+            if report.blocks_scanned == max_blocks && !queue.is_empty() {
+                report.truncated = true;
+                break;
+            }
+        }
+        Ok(report)
     }
 
     pub async fn retrieve(&self, id: &str) -> Result<RemoteDocument> {

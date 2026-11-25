@@ -23,7 +23,7 @@ files pin development/build inputs.
 
 Create a Notion integration with read and update content capabilities, and share
 the pages with it. Set `NOTION_TOKEN` through your normal secrets environment;
-the CLI reads it only for pull and nonempty push operations. For direnv, `.envrc`
+the CLI reads it only for explicit network operations. For direnv, `.envrc`
 loads the Nix shell and optionally sources the ignored `.envrc.local`. Keep your
 token in that private file or your secret manager. Use `direnv exec .` for
 commands requiring those secrets. Never commit a token.
@@ -114,7 +114,63 @@ become file paths. Back up the **whole workspace**, including sled and Markdown.
 Working-file edits are ingested automatically before reads/searches and sync.
 Do not delete working files to delete remote pages: missing files cause an error.
 One Quillship process opens a workspace at a time; finish external editor saves
-before syncing. Paths accept hyphenated or compact UUIDs, rather than full URLs.
+before syncing. Page arguments accept hyphenated/compact UUIDs and HTTPS Notion
+page links, including title slugs and `/p/` links. Link queries/fragments are
+ignored. Only recognised Notion hosts are accepted; pasted links are never fetched.
+
+## Review and organise
+
+```sh
+# Offline review and explicit acceptance of the saved Notion formatting.
+cargo run -- diff PAGE_UUID
+cargo run -- reconcile PAGE_UUID --take baseline --json
+cargo run -- snapshots PAGE_UUID
+cargo run -- snapshot SNAPSHOT_ID --side local > recovered.md
+
+# Fresh complete remote snapshots for reviewing/resolving divergence.
+direnv exec . cargo run -- diff PAGE_UUID --remote --json
+direnv exec . cargo run -- reconcile PAGE_UUID --take local
+direnv exec . cargo run -- reconcile PAGE_UUID --take remote
+direnv exec . cargo run -- reconcile PAGE_UUID --file merged.md
+
+direnv exec . cargo run -- inspect PAGE_UUID --json
+cargo run -- inspect PAGE_UUID --offline --json
+direnv exec . cargo run -- rename PAGE_UUID --title 'Review notes'
+direnv exec . cargo run -- move PAGE_UUID --parent PARENT_UUID
+direnv exec . cargo run -- tree PAGE_UUID --max-depth 8 --max-blocks 10000 --json
+direnv exec . cargo run -- pull PAGE_UUID --recursive --max-depth 8 --max-blocks 10000
+```
+
+`diff` compares exact text against the saved baseline; `--remote` adds a fresh
+baseline/remote comparison. Diffs use a single context-limited hunk and may show
+unchanged lines between separate edits as removals/additions. JSON includes exact
+bodies and completeness diagnostics. Review does not advance the baseline.
+
+`reconcile --take baseline` accepts the saved complete baseline offline, useful
+after Notion normalizes Markdown. `--take local` keeps your body and adopts the
+fresh remote baseline, preparing an intentional overwrite on the next push.
+`--take remote` accepts fresh remote content. `--file` (or stdin `-`) selects a
+merged body over the fresh remote baseline. All choices archive the old local
+body, old baseline, selected result and any fetched remote body in sled before
+changing files. `snapshot --side local|baseline|remote|selected` exports exact
+archived text; missing sides fail. Snapshots survive restart and have no automatic
+pruning. Reconcile never writes to Notion; inspect the diff and explicitly push
+to publish. Incomplete reads are rejected, and concurrent file edits are retained.
+
+`inspect` caches safe page metadata separately; `--offline` reads that cache.
+Rename and move are live writes requiring update content capability. They keep
+local bodies and body baselines intact. Move targets existing pages, rejects
+self-parenting, and leaves descendant-cycle validation to Notion. If a mutation
+is uncertain, inspect before repeating it. Successful identities are reported on
+stderr before local cache refresh; cache errors do not undo remote success.
+
+`tree` follows actual child pages, including pages nested inside container blocks,
+and paginates block children. It does not follow ordinary links or query database
+records. The depth limit counts page nesting; the block budget covers all visited
+blocks. The same budget also caps child-list requests, bounding empty pages with
+changing cursors. Traversal failures, cycles, repeated cursors and limits produce a nonzero
+exit with partial results. Recursive pull requires one root, saves discovered
+pages using normal conflict preservation, and fails if traversal or any pull fails.
 
 ## Sync behavior and conflicts
 
@@ -134,12 +190,10 @@ before syncing. Paths accept hyphenated or compact UUIDs, rather than full URLs.
   your exact local file and records Notion's returned baseline. It reports that
   the file remains dirty; it does not silently discard text during normalization.
 
-To resolve divergence manually, first save your local body elsewhere with
-`view PAGE_UUID > local-backup.md`. Save the old baseline with
-`view PAGE_UUID --baseline > old-baseline.md`. Replace the working body using
-`edit PAGE_UUID --file old-baseline.md`, then `pull PAGE_UUID` to obtain the current
-remote body. Merge your saved local edits into that file, inspect the result,
-and push. Keep the backup until you have checked the result in Notion.
+To resolve divergence, use `diff PAGE_UUID --remote --json` to review all sides,
+prepare a merged file, then `reconcile PAGE_UUID --file merged.md`. Review the
+resulting diff and explicitly push. The reconciliation snapshot retains the
+original bodies, including the submitted merge, for later recovery.
 
 Notion doesn't expose atomic compare-and-swap on Markdown replacement, so a
 remote edit between the preflight read and the write can race. This initial
@@ -160,9 +214,11 @@ A later complete pull clears warnings and can upgrade a clean partial document.
 If a partial document has local edits, save them elsewhere before upgrading and
 merge them after the complete pull, following the conflict workflow above.
 
-Existing page titles/properties are read-only; creation sets the initial title.
-Page deletion, database queries, attachment downloads, automatic merging
-and background synchronization are outside its scope. Search-based discovery is
+Existing page titles can be renamed. Other property updates, database queries,
+comments, targeted remote edits, attachments and a remote-operation recovery
+journal are planned in [`specs/003-notion-workflows`](specs/003-notion-workflows)
+and remain unimplemented. Page deletion, automatic merging and background
+synchronization are outside scope. Search-based discovery is
 eventually consistent and may not return every accessible page immediately; pull
 known page IDs directly when needed. Pull attempts every discovered/requested
 page, reports failed IDs and errors, and prints a saved/incomplete/failed summary.

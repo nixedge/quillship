@@ -64,7 +64,7 @@ impl Document {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct RemoteDocument {
     pub id: String,
     pub title: String,
@@ -75,8 +75,31 @@ pub struct RemoteDocument {
 }
 
 pub fn page_id(input: &str) -> Result<String> {
-    Ok(Uuid::parse_str(input)
-        .with_context(|| format!("invalid page UUID: {input}"))?
-        .hyphenated()
-        .to_string())
+    if let Ok(id) = Uuid::parse_str(input) {
+        return Ok(id.hyphenated().to_string());
+    }
+    let url =
+        reqwest::Url::parse(input).context("expected a page UUID or HTTPS Notion page URL")?;
+    let host = url.host_str().context("Notion URL missing host")?;
+    ensure!(
+        url.scheme() == "https"
+            && url.username().is_empty()
+            && url.password().is_none()
+            && ["notion.so", "notion.com", "notion.site"]
+                .iter()
+                .any(|domain| host == *domain || host.ends_with(&format!(".{domain}"))),
+        "expected an HTTPS Notion page URL without credentials"
+    );
+    let segment = url
+        .path_segments()
+        .and_then(|parts| parts.filter(|s| !s.is_empty()).next_back())
+        .context("Notion URL missing page identity")?;
+    for len in [36, 32] {
+        if let Some(candidate) = segment.get(segment.len().saturating_sub(len)..) {
+            if let Ok(id) = Uuid::parse_str(candidate) {
+                return Ok(id.hyphenated().to_string());
+            }
+        }
+    }
+    anyhow::bail!("Notion URL does not contain a page UUID")
 }

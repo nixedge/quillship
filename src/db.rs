@@ -5,7 +5,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{ensure, Context, Result};
 use tempfile::NamedTempFile;
 
-use crate::document::{page_id, Document};
+use crate::document::{page_id, Document, RemoteDocument};
+use crate::notion::PageInfo;
+use crate::review::Snapshot;
 
 pub struct Store {
     root: PathBuf,
@@ -58,6 +60,89 @@ impl Store {
 
     pub fn contains(&self, id: &str) -> Result<bool> {
         Ok(self.documents.contains_key(page_id(id)?.as_bytes())?)
+    }
+
+    pub fn metadata(&self, id: &str) -> Result<PageInfo> {
+        let id = page_id(id)?;
+        let data = self
+            .db
+            .open_tree("page-metadata-v1")?
+            .get(id.as_bytes())?
+            .context("no cached page metadata; run inspect online first")?;
+        let info: PageInfo = serde_json::from_slice(&data)?;
+        ensure!(info.id == id, "metadata identity mismatch");
+        Ok(info)
+    }
+
+    /// Refresh metadata without advancing a document's body baseline.
+    pub fn save_metadata(&self, info: &PageInfo) -> Result<()> {
+        ensure!(
+            page_id(&info.id)? == info.id,
+            "metadata UUID must be canonical"
+        );
+        self.db
+            .open_tree("page-metadata-v1")?
+            .insert(info.id.as_bytes(), serde_json::to_vec(info)?)?;
+        self.db.flush()?;
+        if self.contains(&info.id)? {
+            let previous = self.get(&info.id)?;
+            let mut next = previous.clone();
+            next.title = info.title.clone();
+            next.url = info.url.clone();
+            next.last_edited_time = info.last_edited_time.clone();
+            self.save(&next, Some(&previous))?;
+        }
+        Ok(())
+    }
+
+    /// Flush a complete recovery record before changing any local document.
+    pub fn archive(
+        &self,
+        doc: &Document,
+        remote: Option<RemoteDocument>,
+        action: &str,
+        selected_markdown: &str,
+    ) -> Result<Snapshot> {
+        let snapshot = Snapshot {
+            id: self.db.generate_id()?,
+            action: action.to_owned(),
+            local: doc.clone(),
+            remote,
+            selected_markdown: selected_markdown.to_owned(),
+        };
+        let snapshots = self.db.open_tree("reconciliation-v1")?;
+        snapshots.insert(snapshot.id.to_be_bytes(), serde_json::to_vec(&snapshot)?)?;
+        self.db
+            .flush()
+            .context("flush recovery snapshot before reconciliation")?;
+        Ok(snapshot)
+    }
+
+    pub fn snapshot(&self, id: u64) -> Result<Snapshot> {
+        let tree = self.db.open_tree("reconciliation-v1")?;
+        let data = tree
+            .get(id.to_be_bytes())?
+            .context("recovery snapshot not found")?;
+        let snapshot: Snapshot = serde_json::from_slice(&data)?;
+        ensure!(snapshot.id == id, "snapshot key/identity mismatch");
+        Ok(snapshot)
+    }
+
+    pub fn snapshots(&self, page: &str) -> Result<Vec<Snapshot>> {
+        let page = page_id(page)?;
+        self.db
+            .open_tree("reconciliation-v1")?
+            .iter()
+            .map(|entry| {
+                let (_, data) = entry?;
+                let snapshot: Snapshot = serde_json::from_slice(&data)?;
+                Ok(snapshot)
+            })
+            .filter_map(|entry: Result<Snapshot>| match entry {
+                Ok(snapshot) if snapshot.local.id != page => None,
+                other => Some(other),
+            })
+            .collect()
     }
 
     pub fn all(&self) -> Result<Vec<Document>> {

@@ -9,6 +9,63 @@ use anyhow::{ensure, Context, Result};
 use crate::db::Store;
 use crate::document::{page_id, Document};
 use crate::notion::{CreateParent, Notion};
+use crate::review::Snapshot;
+
+pub enum Reconcile {
+    Baseline,
+    Local,
+    Remote,
+    Merged(String),
+}
+
+/// Archive every input before changing a working file or baseline. No remote writes.
+pub async fn reconcile(
+    store: &Store,
+    notion: Option<&Notion>,
+    id: &str,
+    choice: Reconcile,
+) -> Result<(Document, Snapshot)> {
+    let previous = store.get(id)?;
+    let mut next = previous.clone();
+    let (remote, action) = match choice {
+        Reconcile::Baseline => {
+            ensure!(
+                !previous.incomplete && previous.sync_warnings.is_empty(),
+                "saved baseline is incomplete; fetch a complete remote snapshot instead"
+            );
+            next.markdown = previous.baseline.clone();
+            (None, "take-baseline")
+        }
+        choice => {
+            let remote = notion
+                .context("remote reconciliation requires a Notion client")?
+                .retrieve(&previous.id)
+                .await?;
+            let (body, action) = match choice {
+                Reconcile::Local => (previous.markdown.clone(), "take-local"),
+                Reconcile::Remote => (remote.markdown.clone(), "take-remote"),
+                Reconcile::Merged(body) => (body, "merge"),
+                Reconcile::Baseline => unreachable!(),
+            };
+            next.markdown = body;
+            next.baseline = remote.markdown.clone();
+            next.title = remote.title.clone();
+            next.url = remote.url.clone();
+            next.last_edited_time = remote.last_edited_time.clone();
+            next.incomplete = false;
+            next.sync_warnings.clear();
+            (Some(remote), action)
+        }
+    };
+    let snapshot = store.archive(&previous, remote, action, &next.markdown)?;
+    store.save(&next, Some(&previous)).with_context(|| {
+        format!(
+            "reconciliation not completed; recovery snapshot {} retained",
+            snapshot.id
+        )
+    })?;
+    Ok((next, snapshot))
+}
 
 pub async fn create_document(
     store: &Store,

@@ -2,7 +2,7 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 
 use anyhow::{ensure, Result};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use serde_json::json;
 
 use quillship::{
@@ -10,7 +10,23 @@ use quillship::{
     db::Store,
     document::{page_id, Document},
     notion::{validate_create, CreateParent, Notion},
+    review::unified_diff,
 };
+
+#[derive(Clone, Copy, ValueEnum)]
+enum Take {
+    Baseline,
+    Local,
+    Remote,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum Side {
+    Local,
+    Baseline,
+    Remote,
+    Selected,
+}
 
 #[derive(Parser)]
 #[command(version, about = "Edit and search Notion documents locally")]
@@ -29,6 +45,82 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Action {
+    /// Inspect remote metadata, or read its cached snapshot offline
+    Inspect {
+        #[arg(value_parser = page_id)]
+        id: String,
+        #[arg(long)]
+        offline: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Rename a page without changing its body
+    Rename {
+        #[arg(value_parser = page_id)]
+        id: String,
+        #[arg(long)]
+        title: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Move a page under another existing page
+    Move {
+        #[arg(value_parser = page_id)]
+        id: String,
+        #[arg(long, value_parser = page_id)]
+        parent: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Discover a bounded tree of actual child pages
+    Tree {
+        #[arg(value_parser = page_id)]
+        id: String,
+        #[arg(long, default_value_t = 8)]
+        max_depth: usize,
+        #[arg(long, default_value_t = 10000)]
+        max_blocks: usize,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Compare exact local and baseline bodies, optionally with fresh remote content
+    Diff {
+        #[arg(value_parser = page_id)]
+        id: String,
+        #[arg(long)]
+        remote: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Back up inputs and resolve a local conflict; never writes to Notion
+    Reconcile {
+        #[arg(value_parser = page_id)]
+        id: String,
+        #[arg(
+            long,
+            value_enum,
+            required_unless_present = "file",
+            conflicts_with = "file"
+        )]
+        take: Option<Take>,
+        #[arg(long, required_unless_present = "take", conflicts_with = "take")]
+        file: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// List durable recovery snapshots for a page (offline)
+    Snapshots {
+        #[arg(value_parser = page_id)]
+        id: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print an exact archived body (offline)
+    Snapshot {
+        id: u64,
+        #[arg(long, value_enum)]
+        side: Side,
+    },
     /// Create one Notion page and save its Markdown working copy
     Create {
         #[arg(long)]
@@ -51,6 +143,13 @@ enum Action {
         ids: Vec<String>,
         #[arg(long, conflicts_with = "ids")]
         query: Option<String>,
+        /// Traverse child pages before pulling; requires one root page
+        #[arg(long, conflicts_with = "query")]
+        recursive: bool,
+        #[arg(long, default_value_t = 8, requires = "recursive")]
+        max_depth: usize,
+        #[arg(long, default_value_t = 10000, requires = "recursive")]
+        max_blocks: usize,
     },
     /// Push edited bodies after checking fresh remote content against the baseline
     Push {
@@ -132,11 +231,190 @@ fn list(docs: &[Document], as_json: bool) -> Result<()> {
     Ok(())
 }
 
+fn print_info(info: &quillship::notion::PageInfo, as_json: bool) -> Result<()> {
+    if as_json {
+        println!("{}", serde_json::to_string_pretty(info)?);
+    } else {
+        println!("{}\t{}\t{}", info.id, info.title, info.url);
+        println!("parent: {}", serde_json::to_string(&info.parent)?);
+        println!(
+            "edited: {}; archived: {}; in trash: {}",
+            info.last_edited_time, info.archived, info.in_trash
+        );
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     let store = Store::open(&cli.workspace)?;
     match cli.command {
+        Action::Inspect {
+            id,
+            offline,
+            json: as_json,
+        } => {
+            let info = if offline {
+                store.metadata(&id)?
+            } else {
+                let info = Notion::from_env()?.inspect(&id).await?;
+                store.save_metadata(&info)?;
+                info
+            };
+            print_info(&info, as_json)
+        }
+        Action::Rename {
+            id,
+            title,
+            json: as_json,
+        } => {
+            validate_create(&CreateParent::Page(id.clone()), &title, "")?;
+            let info = Notion::from_env()?.rename(&id, &title).await?;
+            eprintln!("renamed {} {}", info.id, info.url);
+            store.save_metadata(&info).map_err(|e| anyhow::anyhow!("rename succeeded for {}; metadata refresh failed: {e:#}; inspect this page, do not repeat blindly", info.id))?;
+            print_info(&info, as_json)
+        }
+        Action::Move {
+            id,
+            parent,
+            json: as_json,
+        } => {
+            ensure!(id != parent, "a page cannot be its own parent");
+            let info = Notion::from_env()?.move_page(&id, &parent).await?;
+            eprintln!("moved {} {}", info.id, info.url);
+            store.save_metadata(&info).map_err(|e| anyhow::anyhow!("move succeeded for {}; metadata refresh failed: {e:#}; inspect this page, do not repeat blindly", info.id))?;
+            print_info(&info, as_json)
+        }
+        Action::Tree {
+            id,
+            max_depth,
+            max_blocks,
+            json: as_json,
+        } => {
+            ensure!(max_blocks > 0, "max-blocks must be positive");
+            let report = Notion::from_env()?.tree(&id, max_depth, max_blocks).await?;
+            if as_json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                for page in &report.pages {
+                    println!("{}{}\t{}", "  ".repeat(page.depth), page.id, page.title);
+                }
+                for (id, error) in &report.failures {
+                    eprintln!("failed {id}: {error}");
+                }
+            }
+            ensure!(
+                !report.truncated && report.failures.is_empty(),
+                "tree incomplete: truncated={}, {} failures",
+                report.truncated,
+                report.failures.len()
+            );
+            Ok(())
+        }
+        Action::Diff {
+            id,
+            remote,
+            json: as_json,
+        } => {
+            let doc = store.get(&id)?;
+            let remote = if remote {
+                Some(Notion::from_env()?.retrieve(&id).await?)
+            } else {
+                None
+            };
+            let local_diff = unified_diff(&doc.baseline, &doc.markdown, "baseline", "local");
+            let remote_diff = remote
+                .as_ref()
+                .map(|r| unified_diff(&doc.baseline, &r.markdown, "baseline", "remote"));
+            if as_json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!({
+                        "id": id, "local": doc.markdown, "baseline": doc.baseline,
+                        "incomplete": doc.incomplete, "sync_warnings": doc.sync_warnings,
+                        "remote": remote, "local_diff": local_diff, "remote_diff": remote_diff
+                    }))?
+                );
+            } else {
+                for warning in &doc.sync_warnings {
+                    eprintln!("warning: {warning}");
+                }
+                print!("{local_diff}");
+                if let Some(diff) = remote_diff {
+                    print!("{diff}");
+                }
+            }
+            Ok(())
+        }
+        Action::Reconcile {
+            id,
+            take,
+            file,
+            json: as_json,
+        } => {
+            let choice = if let Some(file) = file {
+                commands::Reconcile::Merged(commands::read_markdown(&file)?)
+            } else {
+                match take.expect("clap requires take or file") {
+                    Take::Baseline => commands::Reconcile::Baseline,
+                    Take::Local => commands::Reconcile::Local,
+                    Take::Remote => commands::Reconcile::Remote,
+                }
+            };
+            let notion = if matches!(choice, commands::Reconcile::Baseline) {
+                None
+            } else {
+                Some(Notion::from_env()?)
+            };
+            let (doc, snapshot) = commands::reconcile(&store, notion.as_ref(), &id, choice).await?;
+            if as_json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(
+                        &json!({"id": id, "snapshot_id": snapshot.id, "dirty": doc.dirty()})
+                    )?
+                );
+            } else {
+                println!(
+                    "reconciled {id}; recovery snapshot {}; {}",
+                    snapshot.id,
+                    if doc.dirty() {
+                        "modified; push to publish"
+                    } else {
+                        "clean"
+                    }
+                );
+            }
+            Ok(())
+        }
+        Action::Snapshots { id, json: as_json } => {
+            let snapshots = store.snapshots(&id)?;
+            if as_json {
+                println!("{}", serde_json::to_string_pretty(&snapshots)?);
+            } else {
+                for s in snapshots {
+                    println!("{}\t{}\t{}", s.id, s.local.id, s.action);
+                }
+            }
+            Ok(())
+        }
+        Action::Snapshot { id, side } => {
+            let s = store.snapshot(id)?;
+            let body = match side {
+                Side::Local => &s.local.markdown,
+                Side::Baseline => &s.local.baseline,
+                Side::Remote => {
+                    &s.remote
+                        .as_ref()
+                        .ok_or_else(|| anyhow::anyhow!("snapshot has no remote body"))?
+                        .markdown
+                }
+                Side::Selected => &s.selected_markdown,
+            };
+            io::stdout().lock().write_all(body.as_bytes())?;
+            Ok(())
+        }
         Action::Create {
             title,
             parent,
@@ -180,9 +458,32 @@ async fn main() -> Result<()> {
             }
             Ok(())
         }
-        Action::Pull { ids, query } => {
-            let report =
-                commands::pull(&store, &Notion::from_env()?, &ids, query.as_deref()).await?;
+        Action::Pull {
+            mut ids,
+            query,
+            recursive,
+            max_depth,
+            max_blocks,
+        } => {
+            ensure!(
+                !recursive || ids.len() == 1,
+                "recursive pull requires exactly one root page"
+            );
+            ensure!(!recursive || max_blocks > 0, "max-blocks must be positive");
+            let notion = Notion::from_env()?;
+            let mut traversal_complete = true;
+            if recursive {
+                let tree = notion.tree(&ids[0], max_depth, max_blocks).await?;
+                for (id, error) in &tree.failures {
+                    eprintln!("tree failed {id}: {error}");
+                }
+                traversal_complete = !tree.truncated && tree.failures.is_empty();
+                if tree.truncated {
+                    eprintln!("warning: tree traversal limit reached; only discovered pages will be pulled");
+                }
+                ids = tree.pages.into_iter().map(|p| p.id).collect();
+            }
+            let report = commands::pull(&store, &notion, &ids, query.as_deref()).await?;
             println!(
                 "Pull complete: {} saved, {} with incomplete remote content, {} failed.",
                 report.pulled,
@@ -193,6 +494,10 @@ async fn main() -> Result<()> {
                 report.failures.is_empty(),
                 "{} page(s) could not be pulled; see failures above",
                 report.failures.len()
+            );
+            ensure!(
+                traversal_complete,
+                "recursive pull saved discovered pages, but traversal was incomplete"
             );
             Ok(())
         }

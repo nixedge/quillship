@@ -45,6 +45,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Action {
+    /// Read cached discussions or explicitly post a comment/reply
+    Comments {
+        #[command(subcommand)]
+        command: CommentAction,
+    },
     /// List durable mutation records offline
     Operations {
         #[arg(long)]
@@ -217,6 +222,43 @@ enum Action {
     },
 }
 
+#[derive(Subcommand)]
+enum CommentAction {
+    /// Fetch unresolved comments, retaining prior cache on any failure
+    Pull {
+        #[arg(value_parser = page_id)]
+        target: String,
+        #[arg(long)]
+        recursive: bool,
+        #[arg(long, default_value_t = 10000)]
+        max_blocks: usize,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Read the last complete cached unresolved-comment snapshot offline
+    List {
+        #[arg(value_parser = page_id)]
+        target: String,
+        #[arg(long)]
+        recursive: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Explicitly post inline Markdown to one page, block or discussion
+    Add {
+        #[arg(long, value_parser = page_id, conflicts_with_all = ["block", "discussion"], required_unless_present_any = ["block", "discussion"])]
+        page: Option<String>,
+        #[arg(long, value_parser = page_id, conflicts_with_all = ["page", "discussion"], required_unless_present_any = ["page", "discussion"])]
+        block: Option<String>,
+        #[arg(long, value_parser = page_id, conflicts_with_all = ["page", "block"], required_unless_present_any = ["page", "block"])]
+        discussion: Option<String>,
+        #[arg(long)]
+        file: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
 fn list(docs: &[Document], as_json: bool) -> Result<()> {
     if as_json {
         let records = docs
@@ -269,6 +311,45 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let store = Store::open(&cli.workspace)?;
     match cli.command {
+        Action::Comments { command } => {
+            use quillship::comments;
+            let value = match command {
+                CommentAction::Pull {
+                    target,
+                    recursive,
+                    max_blocks,
+                    json: _,
+                } => serde_json::to_value(
+                    comments::pull(&store, &Notion::from_env()?, &target, recursive, max_blocks)
+                        .await?,
+                )?,
+                CommentAction::List {
+                    target,
+                    recursive,
+                    json: _,
+                } => serde_json::to_value(store.comments(&target, recursive)?)?,
+                CommentAction::Add {
+                    page,
+                    block,
+                    discussion,
+                    file,
+                    json: _,
+                } => {
+                    let target = if let Some(id) = page {
+                        comments::Target::Page(id)
+                    } else if let Some(id) = block {
+                        comments::Target::Block(id)
+                    } else {
+                        comments::Target::Discussion(discussion.expect("clap requires a target"))
+                    };
+                    let markdown = commands::read_markdown(&file)?;
+                    comments::validate(&markdown)?;
+                    comments::add(&store, &Notion::from_env()?, target, &markdown).await?
+                }
+            };
+            println!("{}", serde_json::to_string_pretty(&value)?);
+            Ok(())
+        }
         Action::Operations {
             pending,
             json: as_json,

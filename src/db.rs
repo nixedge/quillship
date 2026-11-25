@@ -18,6 +18,31 @@ pub struct Store {
 }
 
 impl Store {
+    pub(crate) fn cache_save<T: serde::Serialize>(
+        &self,
+        tree: &str,
+        key: &str,
+        value: &T,
+    ) -> Result<()> {
+        self.db
+            .open_tree(tree)?
+            .insert(key.as_bytes(), serde_json::to_vec(value)?)?;
+        self.db.flush()?;
+        Ok(())
+    }
+
+    pub(crate) fn cache_get<T: serde::de::DeserializeOwned>(
+        &self,
+        tree: &str,
+        key: &str,
+    ) -> Result<T> {
+        let bytes = self
+            .db
+            .open_tree(tree)?
+            .get(key.as_bytes())?
+            .context("no cached snapshot; pull it first")?;
+        Ok(serde_json::from_slice(&bytes)?)
+    }
     pub(crate) fn journal_id(&self) -> Result<u64> {
         Ok(self.db.generate_id()?)
     }

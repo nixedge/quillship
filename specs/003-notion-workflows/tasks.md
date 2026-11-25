@@ -27,9 +27,9 @@ Execute in order. Later tasks remain open until implemented and tested.
 - [x] T018 [US3] Test crash points, uncertain outcomes, restart and duplicate-prevention messaging.
 
 ## Review comments
-- [ ] T019 [US4] Recheck comment contracts and add paginated retrieval with separate cached snapshots.
-- [ ] T020 [US4] Add explicit page/block comments and discussion replies, journalled writes.
-- [ ] T021 [US4] Test pagination, unresolved-only completeness, permissions and restart/offline access.
+- [x] T019 [US4] Recheck comment contracts and add paginated retrieval with separate cached snapshots.
+- [x] T020 [US4] Add explicit page/block comments and discussion replies, journalled writes.
+- [x] T021 [US4] Test pagination, unresolved-only completeness, permissions and restart/offline access.
 
 ## Targeted editing
 - [ ] T022 [US5] Recheck Markdown v2 insertion/update contracts and matching semantics.
@@ -57,4 +57,7 @@ strict all-target Clippy passed through nix develop. git diff --check and generi
 spec-content checks passed. Mock servers and temporary workspaces only; no live
 writes. Recovery validation: 53 tests pass, including injected journal flush
 failures preventing submission, uncertain creation without replay, interrupted
-batch inputs and restart recovery. Formatting and strict Clippy pass. Next: T019.
+batch inputs and restart recovery. Comments validation: 60 tests pass, including
+pagination failure/cache preservation, nested blocks, all posting targets,
+capabilities, partial creation responses and observation-only recovery.
+Formatting and strict Clippy pass. Next: T022.

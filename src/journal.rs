@@ -8,6 +8,10 @@ use crate::{db::Store, document::Document, notion::Notion};
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum Intent {
+    Comment {
+        target: crate::comments::Target,
+        markdown: String,
+    },
     Create {
         parent: Option<String>,
         title: String,
@@ -70,7 +74,7 @@ impl Operation {
 
     pub fn target(&self) -> Option<&str> {
         self.remote_id.as_deref().or(match &self.intent {
-            Intent::Create { .. } => None,
+            Intent::Create { .. } | Intent::Comment { .. } => None,
             Intent::Push { document } => Some(&document.id),
             Intent::Rename { id, .. } | Intent::Move { id, .. } => Some(id),
         })
@@ -139,6 +143,11 @@ pub async fn recover(store: &Store, notion: &Notion, id: u64) -> Result<Operatio
     let target = op.target().context("creation identity is unknown; inspect Notion manually; recovery will not repeat create")?.to_owned();
     let result = async {
         match &op.intent {
+            Intent::Comment { .. } => {
+                let comment = notion.comment(&target).await?;
+                if op.state != State::RemoteConfirmed { store.transition(&mut op, State::RemoteConfirmed)?; }
+                store.save_comment(&comment)?;
+            }
             Intent::Create { markdown, title, .. } => {
                 let authored = markdown.clone();
                 let title = title.clone();

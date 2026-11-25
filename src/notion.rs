@@ -208,7 +208,12 @@ impl Notion {
         })
     }
 
-    async fn request(&self, method: Method, path: &str, body: Option<Value>) -> Result<Value> {
+    pub(crate) async fn request(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<Value>,
+    ) -> Result<Value> {
         for attempt in 0..=3 {
             {
                 let mut last = self.last_request.lock().await;

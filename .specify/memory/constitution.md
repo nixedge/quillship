@@ -20,7 +20,8 @@
 
 Prefer a small library plus CLI over extra services. Network operations must be
 explicit: pull, push, create, inspect, rename, move, tree, diff --remote and
-reconcile with a fresh remote baseline, and recover (observation only). Offline review and cached inspection
+reconcile with a fresh remote baseline, recover (observation only), and comments
+pull/add. Offline review and cached inspection
 require no credentials. Existing body changes require an explicit push;
 new pages require an explicit create command. Creation stores the authored body
 and returned baseline, and reports a successful remote identity before fallible
@@ -39,4 +40,4 @@ agreed approach. Update task completion and document limitations honestly.
 Amend this constitution deliberately with the corresponding specification and
 validation changes. User instructions take precedence.
 
-Version: 1.3.0 | Ratified: 2026-11-24 | Last amended: 2026-11-24
+Version: 1.4.0 | Ratified: 2026-11-24 | Last amended: 2026-11-24

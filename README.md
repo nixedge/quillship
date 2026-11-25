@@ -172,9 +172,35 @@ changing cursors. Traversal failures, cycles, repeated cursors and limits produc
 exit with partial results. Recursive pull requires one root, saves discovered
 pages using normal conflict preservation, and fails if traversal or any pull fails.
 
+## Comments
+
+```sh
+direnv exec . cargo run -- comments pull PAGE_OR_BLOCK_UUID --recursive --json
+cargo run -- comments list PAGE_OR_BLOCK_UUID --recursive --json
+direnv exec . cargo run -- comments add --page PAGE_UUID --file review.md --json
+direnv exec . cargo run -- comments add --block BLOCK_UUID --file review.md --json
+direnv exec . cargo run -- comments add --discussion DISCUSSION_UUID --file reply.md --json
+```
+
+Reads require read-comment capability; writes require insert-comment capability.
+`pull` caches a complete paginated unresolved snapshot separately from Markdown;
+failed/partial pagination preserves the previous cache. `list` is offline and
+shows the cached fetch time. Recursive and direct snapshots are separate; use
+`--recursive` consistently when reading them. Recursion follows actual blocks
+with a configurable `--max-blocks` budget (default 10000); pagination is bounded.
+Results cover unresolved comments, not resolved history.
+
+Add requires exactly one target. Comment Markdown supports inline formatting;
+headings, lists, tables, blockquotes and fenced blocks are rejected before posting.
+Use discussion IDs to reply to existing discussions. New selected-text anchors
+are unsupported. Writes are journalled and report comment identity before local
+persistence. Posting does not refresh the full unresolved snapshot; pull again.
+Recovery of an uncertain post with no identity requires manual inspection rather
+than automated reposting. Partial creation responses still retain input/identity.
+
 ## Interrupted writes
 
-Every CLI create, push, rename and move durably records intent before submission.
+Every CLI create, push, rename, move and comment add durably records intent before submission.
 Sent, confirmed and locally saved transitions distinguish unknown remote outcomes
 from failed local readback. Exact authored inputs and push baselines are retained.
 Each push-batch item has its own operation and shared batch ID; unattempted items
@@ -237,7 +263,7 @@ If a partial document has local edits, save them elsewhere before upgrading and
 merge them after the complete pull, following the conflict workflow above.
 
 Existing page titles can be renamed. Other property updates, database queries,
-comments, targeted remote edits and attachments
+targeted remote edits and attachments
 are planned in [`specs/003-notion-workflows`](specs/003-notion-workflows)
 and remain unimplemented. Page deletion, automatic merging and background
 synchronization are outside scope. Search-based discovery is

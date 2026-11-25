@@ -8,6 +8,21 @@ use crate::{db::Store, document::Document, notion::Notion};
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum Intent {
+    RecordMove {
+        id: String,
+        source: String,
+    },
+    RecordCreate {
+        source: String,
+        properties: serde_json::Value,
+        markdown: Option<String>,
+    },
+    RecordUpdate {
+        id: String,
+        source: String,
+        properties: serde_json::Value,
+        expected: serde_json::Value,
+    },
     Edit {
         document: Document,
         edit: crate::targeted::Edit,
@@ -79,7 +94,8 @@ impl Operation {
 
     pub fn target(&self) -> Option<&str> {
         self.remote_id.as_deref().or(match &self.intent {
-            Intent::Create { .. } | Intent::Comment { .. } => None,
+            Intent::Create { .. } | Intent::Comment { .. } | Intent::RecordCreate { .. } => None,
+            Intent::RecordUpdate { id, .. } | Intent::RecordMove { id, .. } => Some(id),
             Intent::Push { document } | Intent::Edit { document, .. } => Some(&document.id),
             Intent::Rename { id, .. } | Intent::Move { id, .. } => Some(id),
         })
@@ -148,6 +164,15 @@ pub async fn recover(store: &Store, notion: &Notion, id: u64) -> Result<Operatio
     let target = op.target().context("creation identity is unknown; inspect Notion manually; recovery will not repeat create")?.to_owned();
     let result = async {
         match &op.intent {
+            Intent::RecordMove {source,..} => {
+                let info=notion.inspect(&target).await?;
+                ensure!(info.parent.as_ref().and_then(|p|p["data_source_id"].as_str()).and_then(|id|crate::document::page_id(id).ok()).as_deref()==Some(source),"record parent differs from requested source; no move repeated");
+                if op.state!=State::RemoteConfirmed {store.transition(&mut op,State::RemoteConfirmed)?;}
+                store.save_metadata(&info)?;
+            }
+            Intent::RecordCreate {..} | Intent::RecordUpdate {..} => {
+                crate::structured::recover_record(store,notion,&mut op,&target).await?;
+            }
             Intent::Comment { .. } => {
                 let comment = notion.comment(&target).await?;
                 if op.state != State::RemoteConfirmed { store.transition(&mut op, State::RemoteConfirmed)?; }

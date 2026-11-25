@@ -51,6 +51,21 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Action {
+    /// Inspect a database container and its explicitly selectable data sources
+    Database {
+        #[command(subcommand)]
+        command: DatabaseAction,
+    },
+    /// Inspect/query an explicitly chosen data source
+    Source {
+        #[command(subcommand)]
+        command: SourceAction,
+    },
+    /// Read properties or explicitly create/update structured records
+    Record {
+        #[command(subcommand)]
+        command: RecordAction,
+    },
     /// Insert Markdown at the start/end of a clean synced page
     Append {
         #[arg(value_parser = page_id)]
@@ -257,6 +272,87 @@ enum Action {
 }
 
 #[derive(Subcommand)]
+enum DatabaseAction {
+    Inspect {
+        #[arg(value_parser=page_id)]
+        id: String,
+        #[arg(long)]
+        offline: bool,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum SourceAction {
+    Inspect {
+        #[arg(value_parser=page_id)]
+        id: String,
+        #[arg(long)]
+        offline: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    Query {
+        #[arg(value_parser=page_id)]
+        id: String,
+        #[arg(long)]
+        filter: Option<PathBuf>,
+        #[arg(long)]
+        sort: Option<PathBuf>,
+        #[arg(long, default_value_t = 10000)]
+        limit: usize,
+        #[arg(long)]
+        offline: bool,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum RecordAction {
+    /// Move a page into an explicitly selected data source
+    Move {
+        #[arg(value_parser=page_id)]
+        id: String,
+        #[arg(long,value_parser=page_id)]
+        source: String,
+        #[arg(long)]
+        json: bool,
+    },
+    Properties {
+        #[arg(value_parser=page_id)]
+        id: String,
+        #[arg(long)]
+        offline: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    Create {
+        #[arg(long,value_parser=page_id)]
+        source: String,
+        #[arg(long)]
+        properties: PathBuf,
+        #[arg(long)]
+        file: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
+    Update {
+        #[arg(value_parser=page_id)]
+        id: String,
+        #[arg(long)]
+        properties: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+fn json_file(path: &std::path::Path) -> Result<serde_json::Value> {
+    Ok(serde_json::from_str(&commands::read_markdown(path)?)?)
+}
+
+#[derive(Subcommand)]
 enum CommentAction {
     /// Fetch unresolved comments, retaining prior cache on any failure
     Pull {
@@ -345,6 +441,144 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let store = Store::open(&cli.workspace)?;
     match cli.command {
+        Action::Database {
+            command:
+                DatabaseAction::Inspect {
+                    id,
+                    offline,
+                    json: _,
+                },
+        } => {
+            let notion = if offline {
+                None
+            } else {
+                Some(Notion::from_env()?)
+            };
+            println!(
+                "{}",
+                serde_json::to_string_pretty(
+                    &quillship::structured::database(&store, notion.as_ref(), &id).await?
+                )?
+            );
+            Ok(())
+        }
+        Action::Source { command } => {
+            match command {
+                SourceAction::Inspect {
+                    id,
+                    offline,
+                    json: _,
+                } => {
+                    let notion = if offline {
+                        None
+                    } else {
+                        Some(Notion::from_env()?)
+                    };
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(
+                            &quillship::structured::source(&store, notion.as_ref(), &id).await?
+                        )?
+                    );
+                }
+                SourceAction::Query {
+                    id,
+                    filter,
+                    sort,
+                    limit,
+                    offline,
+                    json: _,
+                } => {
+                    ensure!(
+                        filter.as_deref() != Some(std::path::Path::new("-"))
+                            || sort.as_deref() != Some(std::path::Path::new("-")),
+                        "only one JSON input may read stdin"
+                    );
+                    let filter = filter.as_deref().map(json_file).transpose()?;
+                    let sort = sort.as_deref().map(json_file).transpose()?;
+                    let notion = if offline {
+                        None
+                    } else {
+                        Some(Notion::from_env()?)
+                    };
+                    let result = quillship::structured::query(
+                        &store,
+                        notion.as_ref(),
+                        &id,
+                        filter,
+                        sort,
+                        limit,
+                    )
+                    .await?;
+                    println!("{}", serde_json::to_string_pretty(&result)?);
+                    ensure!(
+                        result.complete,
+                        "query incomplete; previous complete cache preserved"
+                    );
+                }
+            }
+            Ok(())
+        }
+        Action::Record { command } => {
+            if let RecordAction::Move {
+                id,
+                source,
+                json: as_json,
+            } = command
+            {
+                let info =
+                    quillship::structured::move_record(&store, &Notion::from_env()?, &id, &source)
+                        .await?;
+                return print_info(&info, as_json);
+            }
+            let value = match command {
+                RecordAction::Move { .. } => unreachable!("handled above"),
+                RecordAction::Properties {
+                    id,
+                    offline,
+                    json: _,
+                } => {
+                    let notion = if offline {
+                        None
+                    } else {
+                        Some(Notion::from_env()?)
+                    };
+                    quillship::structured::properties(&store, notion.as_ref(), &id).await?
+                }
+                RecordAction::Create {
+                    source,
+                    properties,
+                    file,
+                    json: _,
+                } => {
+                    ensure!(
+                        properties.as_path() != std::path::Path::new("-")
+                            || file.as_deref() != Some(std::path::Path::new("-")),
+                        "only one input may read stdin"
+                    );
+                    let input = json_file(&properties)?;
+                    let body = file.as_deref().map(commands::read_markdown).transpose()?;
+                    quillship::structured::create(
+                        &store,
+                        &Notion::from_env()?,
+                        &source,
+                        &input,
+                        body,
+                    )
+                    .await?
+                }
+                RecordAction::Update {
+                    id,
+                    properties,
+                    json: _,
+                } => {
+                    let input = json_file(&properties)?;
+                    quillship::structured::update(&store, &Notion::from_env()?, &id, &input).await?
+                }
+            };
+            println!("{}", serde_json::to_string_pretty(&value)?);
+            Ok(())
+        }
         Action::Append {
             id,
             file,

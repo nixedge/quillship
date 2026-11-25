@@ -37,10 +37,10 @@ Execute in order. Later tasks remain open until implemented and tested.
 - [x] T024 [US5] Test ambiguous/absent matches, child-page preservation and uncertain-write recovery.
 
 ## Structured records
-- [ ] T025 [US6] Add database/data-source schema retrieval and separate persistence.
-- [ ] T026 [US6] Add typed paginated queries and paginated property-item reads.
-- [ ] T027 [US6] Add schema-validated record creation and selected property updates.
-- [ ] T028 [US6] Test unsupported/read-only properties, explicit clearing, limits and concurrent change preservation.
+- [x] T025 [US6] Add database/data-source schema retrieval and separate persistence.
+- [x] T026 [US6] Add typed paginated queries and paginated property-item reads.
+- [x] T027 [US6] Add schema-validated record creation, selected property updates and data-source moves.
+- [x] T028 [US6] Test unsupported/read-only properties, explicit clearing, limits and concurrent change preservation.
 
 ## Attachments
 - [ ] T029 [US7] Add file/block/property discovery and stable identity metadata.
@@ -65,4 +65,8 @@ guarded append/replace, readback changes, normalization, concurrent edits and
 recovery. The user approved bounded lock contention retry after intermittent
 sled reopen failures; storage-lifecycle.md records the narrow implementation.
 Full suite: 71 tests pass, including real reopen and exclusive-lock checks.
-Next: T025.
+Structured records: 83 tests pass, with fmt and strict all-target Clippy. Coverage
+includes multiple sources, schema drift, property pagination/cache preservation,
+explicit clearing, selected-column conflicts, unrelated changes, body preservation,
+capped/limited queries, journalled record creation/update/recovery and source moves.
+Next: T029.

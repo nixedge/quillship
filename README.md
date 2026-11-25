@@ -172,6 +172,57 @@ changing cursors. Traversal failures, cycles, repeated cursors and limits produc
 exit with partial results. Recursive pull requires one root, saves discovered
 pages using normal conflict preservation, and fails if traversal or any pull fails.
 
+## Databases, data sources and records
+
+```sh
+direnv exec . cargo run -- database inspect DATABASE_UUID --json
+direnv exec . cargo run -- source inspect SOURCE_UUID --json
+direnv exec . cargo run -- source query SOURCE_UUID --filter filter.json --sort sorts.json --limit 10000 --json
+direnv exec . cargo run -- record properties PAGE_UUID --json
+cargo run -- record properties PAGE_UUID --offline --json
+direnv exec . cargo run -- record update PAGE_UUID --properties changes.json --json
+direnv exec . cargo run -- record create --source SOURCE_UUID --properties values.json --file body.md --json
+direnv exec . cargo run -- record move PAGE_UUID --source SOURCE_UUID --json
+```
+
+Database inspection lists all contained sources; callers choose a source UUID
+explicitly. Inspection, queries and property reads support `--offline`. Schemas,
+complete query snapshots and complete property baselines are separate sled records.
+They never advance Markdown body baselines. Ephemeral file download URLs are
+removed from durable structured snapshots; retrieve file access when needed.
+
+Filter and sort files use native Notion JSON. Predicates are checked against
+schema types and supported operators: text, number, checkbox, select/status, date
+and relation conditions, plus bounded and/or groups. Sorts select a property or
+creation/edit timestamp and an ascending/descending direction. Unknown conditions
+fail explicitly. Query caps, requested limits, duplicate identities and pagination
+problems are reported. Incomplete results do not replace a complete cached query;
+the CLI emits results/diagnostics and exits nonzero. Offline queries require the
+same filter/sort/limit as the cached complete query.
+
+Property input is a native object such as
+`{"Count":{"number":42},"Done":{"checkbox":true}}`. Names or stable property IDs
+are accepted; duplicate/ambiguous selections fail. Writable types are title,
+rich_text (text items), number, checkbox, select/status, date, URL and relation.
+Select/status options must exist in the schema. Other types are retained on read
+and rejected on write. Empty arrays explicitly clear text/relations; nullable
+types accept null; checkbox clearing is false. Status null requests Notion's
+default option. Unsupported normalization/default outcomes can require manual
+inspection during recovery rather than assuming equivalence.
+
+`record properties` fully paginates text, people, relations and rollups, checks
+edit timestamps, and retains the previous baseline if retrieval fails. These
+reads remain limited to the connection's permissions. Query rows alone do not
+prove property completeness. Before update, fetch/review a complete property
+baseline. The command verifies selected columns against a fresh snapshot; changes
+to other columns are preserved. Updates send only selected properties and retain
+the input in the journal. After a conflict, review fresh properties before another
+explicit update. Property preflight has the same final remote race limitation as
+body writes. Creation with body input retains exact authored Markdown and a remote
+baseline; a properties-only create does not invent a local body working copy.
+Moving into another source preserves the body baseline; fetch properties explicitly
+before updating the moved record. Notion validates source compatibility.
+
 ## Targeted edits
 
 ```sh
@@ -226,8 +277,8 @@ than automated reposting. Partial creation responses still retain input/identity
 
 ## Interrupted writes
 
-Every CLI create, push, rename, move, comment add, append and replace durably records
-intent before submission.
+Every CLI mutation, including record creation/update, durably records intent
+before submission.
 Sent, confirmed and locally saved transitions distinguish unknown remote outcomes
 from failed local readback. Exact authored inputs and push baselines are retained.
 Each push-batch item has its own operation and shared batch ID; unattempted items
@@ -289,8 +340,7 @@ A later complete pull clears warnings and can upgrade a clean partial document.
 If a partial document has local edits, save them elsewhere before upgrading and
 merge them after the complete pull, following the conflict workflow above.
 
-Existing page titles can be renamed. Other property updates, database queries,
-attachments
+Existing page titles and supported record properties can be updated. Attachments
 are planned in [`specs/003-notion-workflows`](specs/003-notion-workflows)
 and remain unimplemented. Page deletion, automatic merging and background
 synchronization are outside scope. Search-based discovery is

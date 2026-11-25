@@ -5,4 +5,5 @@ pub mod document;
 pub mod journal;
 pub mod notion;
 pub mod review;
+pub mod structured;
 pub mod targeted;

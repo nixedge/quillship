@@ -8,6 +8,11 @@ use crate::{db::Store, document::Document, notion::Notion};
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum Intent {
+    Edit {
+        document: Document,
+        edit: crate::targeted::Edit,
+        selected: String,
+    },
     Comment {
         target: crate::comments::Target,
         markdown: String,
@@ -75,7 +80,7 @@ impl Operation {
     pub fn target(&self) -> Option<&str> {
         self.remote_id.as_deref().or(match &self.intent {
             Intent::Create { .. } | Intent::Comment { .. } => None,
-            Intent::Push { document } => Some(&document.id),
+            Intent::Push { document } | Intent::Edit { document, .. } => Some(&document.id),
             Intent::Rename { id, .. } | Intent::Move { id, .. } => Some(id),
         })
     }
@@ -165,8 +170,9 @@ pub async fn recover(store: &Store, notion: &Notion, id: u64) -> Result<Operatio
                     store.save(&doc, None)?;
                 }
             }
-            Intent::Push { document } => {
-                let submitted = document.markdown.clone();
+            Intent::Push { document } | Intent::Edit {document,..} => {
+                let document = document.clone();
+                let submitted = match &op.intent {Intent::Edit {selected,..}=>selected.clone(),_=>document.markdown.clone()};
                 let remote = notion.retrieve(&target).await?;
                 let expected = op.remote_body.as_deref().unwrap_or(&submitted);
                 ensure!(remote.markdown == expected, "remote body does not match the recorded outcome; normalization or later edits require explicit reconciliation");
@@ -175,6 +181,9 @@ pub async fn recover(store: &Store, notion: &Notion, id: u64) -> Result<Operatio
                 op.remote_body = Some(remote.markdown.clone());
                 if op.state != State::RemoteConfirmed { store.transition(&mut op, State::RemoteConfirmed)?; }
                 let mut next = current.clone();
+                if matches!(&op.intent,Intent::Edit {..}) && current.markdown == document.markdown {
+                    next.markdown=submitted;
+                }
                 next.baseline = remote.markdown;
                 next.title = remote.title;
                 next.url = remote.url;

@@ -32,9 +32,9 @@ Execute in order. Later tasks remain open until implemented and tested.
 - [x] T021 [US4] Test pagination, unresolved-only completeness, permissions and restart/offline access.
 
 ## Targeted editing
-- [ ] T022 [US5] Recheck Markdown v2 insertion/update contracts and matching semantics.
-- [ ] T023 [US5] Implement guarded append/replace, journalled input and normalized readback.
-- [ ] T024 [US5] Test ambiguous/absent matches, child-page preservation and uncertain-write recovery.
+- [x] T022 [US5] Recheck Markdown v2 insertion/update contracts and matching semantics.
+- [x] T023 [US5] Implement guarded append/replace, journalled input and normalized readback.
+- [x] T024 [US5] Test ambiguous/absent matches, child-page preservation and uncertain-write recovery.
 
 ## Structured records
 - [ ] T025 [US6] Add database/data-source schema retrieval and separate persistence.
@@ -60,4 +60,9 @@ failures preventing submission, uncertain creation without replay, interrupted
 batch inputs and restart recovery. Comments validation: 60 tests pass, including
 pagination failure/cache preservation, nested blocks, all posting targets,
 capabilities, partial creation responses and observation-only recovery.
-Formatting and strict Clippy pass. Next: T022.
+Formatting and strict Clippy pass. Targeted edits: nine focused tests cover
+guarded append/replace, readback changes, normalization, concurrent edits and
+recovery. The user approved bounded lock contention retry after intermittent
+sled reopen failures; storage-lifecycle.md records the narrow implementation.
+Full suite: 71 tests pass, including real reopen and exclusive-lock checks.
+Next: T025.

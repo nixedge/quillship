@@ -175,6 +175,10 @@ impl Markdown {
 }
 
 impl Notion {
+    pub(crate) fn complete_markdown(&self, value: Value) -> Result<String> {
+        let markdown: Markdown = serde_json::from_value(value)?;
+        markdown.complete()
+    }
     pub fn from_env() -> Result<Self> {
         Self::new(
             &std::env::var("NOTION_TOKEN").context("set NOTION_TOKEN for network commands")?,

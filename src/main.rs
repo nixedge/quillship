@@ -28,6 +28,12 @@ enum Side {
     Selected,
 }
 
+#[derive(Clone, Copy, ValueEnum)]
+enum InsertPosition {
+    Start,
+    End,
+}
+
 #[derive(Parser)]
 #[command(version, about = "Edit and search Notion documents locally")]
 struct Cli {
@@ -45,6 +51,34 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Action {
+    /// Insert Markdown at the start/end of a clean synced page
+    Append {
+        #[arg(value_parser = page_id)]
+        id: String,
+        #[arg(long)]
+        file: PathBuf,
+        #[arg(long, value_enum, default_value_t = InsertPosition::End)]
+        position: InsertPosition,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Replace one exact match, or explicitly all matches, on a clean synced page
+    Replace {
+        #[arg(value_parser = page_id)]
+        id: String,
+        #[arg(long)]
+        old_file: PathBuf,
+        #[arg(long)]
+        new_file: PathBuf,
+        #[arg(long)]
+        all_matches: bool,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        json: bool,
+    },
     /// Read cached discussions or explicitly post a comment/reply
     Comments {
         #[command(subcommand)]
@@ -311,6 +345,58 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let store = Store::open(&cli.workspace)?;
     match cli.command {
+        Action::Append {
+            id,
+            file,
+            position,
+            dry_run,
+            json: _,
+        } => {
+            use quillship::targeted::{self, Edit, Position};
+            let edit = Edit::Append {
+                content: commands::read_markdown(&file)?,
+                position: match position {
+                    InsertPosition::Start => Position::Start,
+                    InsertPosition::End => Position::End,
+                },
+            };
+            let notion = if dry_run {
+                None
+            } else {
+                Some(Notion::from_env()?)
+            };
+            let outcome = targeted::run(&store, notion.as_ref(), &id, edit, dry_run).await?;
+            println!("{}", serde_json::to_string_pretty(&outcome)?);
+            Ok(())
+        }
+        Action::Replace {
+            id,
+            old_file,
+            new_file,
+            all_matches,
+            dry_run,
+            json: _,
+        } => {
+            ensure!(
+                old_file.as_path() != std::path::Path::new("-")
+                    || new_file.as_path() != std::path::Path::new("-"),
+                "only one input may read stdin"
+            );
+            let edit = quillship::targeted::Edit::Replace {
+                old: commands::read_markdown(&old_file)?,
+                new: commands::read_markdown(&new_file)?,
+                all_matches,
+            };
+            let notion = if dry_run {
+                None
+            } else {
+                Some(Notion::from_env()?)
+            };
+            let outcome =
+                quillship::targeted::run(&store, notion.as_ref(), &id, edit, dry_run).await?;
+            println!("{}", serde_json::to_string_pretty(&outcome)?);
+            Ok(())
+        }
         Action::Comments { command } => {
             use quillship::comments;
             let value = match command {

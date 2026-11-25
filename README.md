@@ -172,6 +172,32 @@ changing cursors. Traversal failures, cycles, repeated cursors and limits produc
 exit with partial results. Recursive pull requires one root, saves discovered
 pages using normal conflict preservation, and fails if traversal or any pull fails.
 
+## Targeted edits
+
+```sh
+cargo run -- append PAGE_UUID --file addition.md --dry-run --json
+direnv exec . cargo run -- append PAGE_UUID --file addition.md --position end --json
+direnv exec . cargo run -- replace PAGE_UUID --old-file old.txt --new-file new.md --json
+direnv exec . cargo run -- replace PAGE_UUID --old-file old.txt --new-file new.md --all-matches --json
+```
+
+Append inserts whole Markdown content at the start/end of a clean synced page.
+Replace uses exact case-sensitive matching and requires one nonempty match unless
+`--all-matches` is explicit. Empty replacement text deletes matched text; child
+page/database deletion stays disabled at the API. Inputs support stdin `-`, with
+only one stdin source per replacement.
+
+Dry-run is offline, creates no journal entry, and marks `remote_checked: false`.
+Its preview uses the saved complete body; append separates old/new content with
+two newlines. The live command retrieves complete current content and refuses
+dirty, incomplete, divergent or concurrently changed inputs before submission.
+It journals original/input/selected text, calls native insert/update Markdown v2,
+and verifies fresh readback. Exact selected text is retained when Notion normalizes
+formatting; the result can remain dirty until reviewed and accepted with reconcile.
+Edits made during the write survive. Failed/changed readback leaves a recoverable
+record; no mutation is automatically replayed. These checks do not close Notion's
+final remote race window.
+
 ## Comments
 
 ```sh
@@ -200,7 +226,8 @@ than automated reposting. Partial creation responses still retain input/identity
 
 ## Interrupted writes
 
-Every CLI create, push, rename, move and comment add durably records intent before submission.
+Every CLI create, push, rename, move, comment add, append and replace durably records
+intent before submission.
 Sent, confirmed and locally saved transitions distinguish unknown remote outcomes
 from failed local readback. Exact authored inputs and push baselines are retained.
 Each push-batch item has its own operation and shared batch ID; unattempted items
@@ -263,7 +290,7 @@ If a partial document has local edits, save them elsewhere before upgrading and
 merge them after the complete pull, following the conflict workflow above.
 
 Existing page titles can be renamed. Other property updates, database queries,
-targeted remote edits and attachments
+attachments
 are planned in [`specs/003-notion-workflows`](specs/003-notion-workflows)
 and remain unimplemented. Page deletion, automatic merging and background
 synchronization are outside scope. Search-based discovery is

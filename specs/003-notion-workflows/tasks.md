@@ -21,10 +21,10 @@ Execute in order. Later tasks remain open until implemented and tested.
 - [x] T014 Run Nix tests, fmt and strict Clippy; inspect initial tranche diff.
 
 ## Operation recovery
-- [ ] T015 [US3] Add versioned journal models/tree, durable input records and state transitions.
-- [ ] T016 [US3] Integrate create/push/rename/move and per-item batch results.
-- [ ] T017 [US3] Add journal inspection and read-only recovery/reconciliation commands.
-- [ ] T018 [US3] Test crash points, uncertain outcomes, restart and duplicate-prevention messaging.
+- [x] T015 [US3] Add versioned journal models/tree, durable input records and state transitions.
+- [x] T016 [US3] Integrate create/push/rename/move and per-item batch results.
+- [x] T017 [US3] Add journal inspection and read-only recovery/reconciliation commands.
+- [x] T018 [US3] Test crash points, uncertain outcomes, restart and duplicate-prevention messaging.
 
 ## Review comments
 - [ ] T019 [US4] Recheck comment contracts and add paginated retrieval with separate cached snapshots.
@@ -55,4 +55,6 @@ Execute in order. Later tasks remain open until implemented and tested.
 Initial validation: 46 tests passed (30 existing, 16 added), cargo fmt --check and
 strict all-target Clippy passed through nix develop. git diff --check and generic
 spec-content checks passed. Mock servers and temporary workspaces only; no live
-writes. Next task: T015. Later workstreams remain unimplemented.
+writes. Recovery validation: 53 tests pass, including injected journal flush
+failures preventing submission, uncertain creation without replay, interrupted
+batch inputs and restart recovery. Formatting and strict Clippy pass. Next: T019.

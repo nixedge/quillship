@@ -45,6 +45,25 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Action {
+    /// List durable mutation records offline
+    Operations {
+        #[arg(long)]
+        pending: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Inspect exact input and outcome of one mutation offline
+    Operation {
+        id: u64,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Observe an interrupted mutation without resubmitting it
+    Recover {
+        id: u64,
+        #[arg(long)]
+        json: bool,
+    },
     /// Inspect remote metadata, or read its cached snapshot offline
     Inspect {
         #[arg(value_parser = page_id)]
@@ -250,6 +269,39 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let store = Store::open(&cli.workspace)?;
     match cli.command {
+        Action::Operations {
+            pending,
+            json: as_json,
+        } => {
+            let ops = store
+                .operations()?
+                .into_iter()
+                .filter(|op| !pending || op.pending())
+                .collect::<Vec<_>>();
+            if as_json {
+                println!("{}", serde_json::to_string_pretty(&ops)?);
+            } else {
+                for op in ops {
+                    println!(
+                        "{}\t{:?}\t{}\tbatch {:?}",
+                        op.id,
+                        op.state,
+                        op.target().unwrap_or("identity unknown"),
+                        op.batch_id
+                    );
+                }
+            }
+            Ok(())
+        }
+        Action::Operation { id, json: _ } => {
+            println!("{}", serde_json::to_string_pretty(&store.operation(id)?)?);
+            Ok(())
+        }
+        Action::Recover { id, json: _ } => {
+            let op = quillship::journal::recover(&store, &Notion::from_env()?, id).await?;
+            println!("{}", serde_json::to_string_pretty(&op)?);
+            Ok(())
+        }
         Action::Inspect {
             id,
             offline,
@@ -270,9 +322,7 @@ async fn main() -> Result<()> {
             json: as_json,
         } => {
             validate_create(&CreateParent::Page(id.clone()), &title, "")?;
-            let info = Notion::from_env()?.rename(&id, &title).await?;
-            eprintln!("renamed {} {}", info.id, info.url);
-            store.save_metadata(&info).map_err(|e| anyhow::anyhow!("rename succeeded for {}; metadata refresh failed: {e:#}; inspect this page, do not repeat blindly", info.id))?;
+            let info = commands::rename_page(&store, &Notion::from_env()?, &id, &title).await?;
             print_info(&info, as_json)
         }
         Action::Move {
@@ -281,9 +331,7 @@ async fn main() -> Result<()> {
             json: as_json,
         } => {
             ensure!(id != parent, "a page cannot be its own parent");
-            let info = Notion::from_env()?.move_page(&id, &parent).await?;
-            eprintln!("moved {} {}", info.id, info.url);
-            store.save_metadata(&info).map_err(|e| anyhow::anyhow!("move succeeded for {}; metadata refresh failed: {e:#}; inspect this page, do not repeat blindly", info.id))?;
+            let info = commands::move_page(&store, &Notion::from_env()?, &id, &parent).await?;
             print_info(&info, as_json)
         }
         Action::Tree {
@@ -518,11 +566,7 @@ async fn main() -> Result<()> {
                 return Ok(());
             }
             let notion = Notion::from_env()?;
-            for doc in pending {
-                commands::push_document(&store, &notion, &doc).await?;
-                println!("pushed {}", doc.id);
-            }
-            Ok(())
+            commands::push_batch(&store, &notion, &pending).await
         }
         Action::List { json } | Action::Status { json } => list(&store.all()?, json),
         Action::View { id, baseline } => {

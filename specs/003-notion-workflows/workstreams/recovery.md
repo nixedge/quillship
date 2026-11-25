@@ -1,5 +1,6 @@
 # Operation recovery plan
-US3 follows the initial review/organisation tranche.
+US3 follows the initial review/organisation tranche. Implemented in journal.rs,
+commands.rs, db.rs and the CLI; validation recorded in tasks.md.
 
 CLI: operations [--pending] --json; operation ID --json; recover ID [--json].
 The recovery command observes state and saves a verified outcome; it does not
@@ -7,7 +8,7 @@ resubmit an uncertain non-idempotent request. Reissuing an action is a separate
 explicit user command after inspection.
 
 Persist JournalEntry in operations-v1: monotonic id, action, target/parent,
-authored input, expected baseline/metadata, timestamps, state and safe response
+authored input, expected body baseline (for push), requested metadata, timestamps, state and safe response
 identity. States: prepared -> sent -> remote-confirmed -> locally-saved, or
 uncertain/failed. Flush each transition before the next irreversible step.
 Prepare before requests; sent marks that remote outcome might be unknown.

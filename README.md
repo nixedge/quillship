@@ -172,6 +172,28 @@ changing cursors. Traversal failures, cycles, repeated cursors and limits produc
 exit with partial results. Recursive pull requires one root, saves discovered
 pages using normal conflict preservation, and fails if traversal or any pull fails.
 
+## Interrupted writes
+
+Every CLI create, push, rename and move durably records intent before submission.
+Sent, confirmed and locally saved transitions distinguish unknown remote outcomes
+from failed local readback. Exact authored inputs and push baselines are retained.
+Each push-batch item has its own operation and shared batch ID; unattempted items
+remain prepared when a batch stops.
+
+```sh
+cargo run -- operations --pending --json
+cargo run -- operation OPERATION_ID --json
+direnv exec . cargo run -- recover OPERATION_ID --json
+```
+
+Inspection is offline. Recovery only reads Notion and updates verified local
+state; it never repeats a mutation. It retains concurrent local edits and refuses
+to advance a baseline if the observed result differs from the recorded outcome.
+An uncertain create without a returned identity needs manual inspection in
+Notion. Unknown normalization or later remote changes need explicit reconcile.
+Prepared entries were not sent; issue a new explicit command after reviewing
+their inputs. Completed records are retained without automatic pruning.
+
 ## Sync behavior and conflicts
 
 - Pull updates clean documents and preserves dirty local bodies when the remote
@@ -215,8 +237,8 @@ If a partial document has local edits, save them elsewhere before upgrading and
 merge them after the complete pull, following the conflict workflow above.
 
 Existing page titles can be renamed. Other property updates, database queries,
-comments, targeted remote edits, attachments and a remote-operation recovery
-journal are planned in [`specs/003-notion-workflows`](specs/003-notion-workflows)
+comments, targeted remote edits and attachments
+are planned in [`specs/003-notion-workflows`](specs/003-notion-workflows)
 and remain unimplemented. Page deletion, automatic merging and background
 synchronization are outside scope. Search-based discovery is
 eventually consistent and may not return every accessible page immediately; pull

@@ -13,9 +13,57 @@ pub struct Store {
     root: PathBuf,
     db: sled::Db,
     documents: sled::Tree,
+    #[cfg(test)]
+    fail_journal_state: Option<crate::journal::State>,
 }
 
 impl Store {
+    pub(crate) fn journal_id(&self) -> Result<u64> {
+        Ok(self.db.generate_id()?)
+    }
+
+    pub(crate) fn write_operation(&self, operation: &crate::journal::Operation) -> Result<()> {
+        #[cfg(test)]
+        ensure!(
+            self.fail_journal_state != Some(operation.state),
+            "injected journal storage failure"
+        );
+        self.db
+            .open_tree("operations-v1")?
+            .insert(operation.id.to_be_bytes(), serde_json::to_vec(operation)?)?;
+        self.db
+            .flush()
+            .context("flush operation journal before proceeding")?;
+        Ok(())
+    }
+
+    pub fn operation(&self, id: u64) -> Result<crate::journal::Operation> {
+        let data = self
+            .db
+            .open_tree("operations-v1")?
+            .get(id.to_be_bytes())?
+            .context("operation not found")?;
+        let op: crate::journal::Operation = serde_json::from_slice(&data)?;
+        ensure!(op.id == id, "operation identity mismatch");
+        Ok(op)
+    }
+
+    pub fn operations(&self) -> Result<Vec<crate::journal::Operation>> {
+        self.db
+            .open_tree("operations-v1")?
+            .iter()
+            .map(|entry| {
+                let (key, value) = entry?;
+                let op: crate::journal::Operation = serde_json::from_slice(&value)?;
+                ensure!(
+                    key.as_ref() == op.id.to_be_bytes(),
+                    "operation identity mismatch"
+                );
+                Ok(op)
+            })
+            .collect()
+    }
+
     pub fn open(root: &Path) -> Result<Self> {
         fs::create_dir_all(root.join("docs")).context("create document directory")?;
         let root = fs::canonicalize(root).context("resolve workspace")?;
@@ -26,6 +74,8 @@ impl Store {
             root,
             db,
             documents,
+            #[cfg(test)]
+            fail_journal_state: None,
         })
     }
 
@@ -190,5 +240,37 @@ impl Store {
             fs::File::open(self.root.join("docs"))?.sync_all()?;
         }
         self.record(doc)
+    }
+}
+
+#[cfg(test)]
+mod journal_failures {
+    use super::*;
+    use crate::{
+        commands,
+        journal::State,
+        notion::{CreateParent, Notion},
+    };
+
+    #[tokio::test]
+    async fn failed_preparation_or_sent_flush_prevents_mutation() {
+        for failure in [State::Prepared, State::Sent] {
+            let dir = tempfile::TempDir::new().unwrap();
+            let mut store = Store::open(dir.path()).unwrap();
+            store.fail_journal_state = Some(failure);
+            let server = wiremock::MockServer::start().await;
+            let notion = Notion::new("test", &format!("{}/v1", server.uri())).unwrap();
+            let error = commands::create_document(
+                &store,
+                &notion,
+                &CreateParent::Workspace,
+                "Notes",
+                "authored",
+            )
+            .await
+            .unwrap_err();
+            assert!(format!("{error:#}").contains("injected journal storage failure"));
+            assert!(server.received_requests().await.unwrap().is_empty());
+        }
     }
 }

@@ -8,6 +8,7 @@ use anyhow::{ensure, Context, Result};
 
 use crate::db::Store;
 use crate::document::{page_id, Document};
+use crate::journal::{Intent, Operation, State};
 use crate::notion::{CreateParent, Notion};
 use crate::review::Snapshot;
 
@@ -74,20 +75,39 @@ pub async fn create_document(
     title: &str,
     markdown: &str,
 ) -> Result<Document> {
+    crate::notion::validate_create(parent, title, markdown)?;
+    let mut operation = store.prepare(
+        Intent::Create {
+            parent: match parent {
+                CreateParent::Workspace => None,
+                CreateParent::Page(id) => Some(page_id(id)?),
+            },
+            title: title.to_owned(),
+            markdown: markdown.to_owned(),
+        },
+        None,
+    )?;
+    let result = async {
+    store.transition(&mut operation, State::Sent)?;
     let created = notion.create(parent, title, markdown).await?;
     // Report identity before any readback or persistence operation can fail.
     eprintln!("created {} {}", created.id, created.url);
+    operation.remote_id = Some(created.id.clone());
+    store.transition(&mut operation, State::RemoteConfirmed)?;
     let persist = async {
         let remote = notion.retrieve_for_pull(&created.id).await?;
         let mut doc = Document::from_remote(remote);
         doc.markdown = markdown.to_owned();
         store.save(&doc, None)?;
+        store.transition(&mut operation, State::LocallySaved)?;
         Ok::<_, anyhow::Error>(doc)
     };
     persist.await.with_context(|| format!(
         "page {} exists at {}, but local save/readback failed; preserve the input and pull this UUID; do not repeat create",
         created.id, created.url
     ))
+    }.await;
+    store.operation_result(&mut operation, result)
 }
 
 #[derive(Debug, Default)]
@@ -187,6 +207,43 @@ pub async fn push_document(store: &Store, notion: &Notion, doc: &Document) -> Re
     if !doc.dirty() {
         return Ok(());
     }
+    let mut operation = store.prepare(
+        Intent::Push {
+            document: doc.clone(),
+        },
+        None,
+    )?;
+    push_recorded(store, notion, doc, &mut operation).await
+}
+
+/// Prepare every batch item first, so an interrupted batch retains unattempted inputs.
+pub async fn push_batch(store: &Store, notion: &Notion, docs: &[Document]) -> Result<()> {
+    let batch = store.journal_id()?;
+    let mut entries = docs
+        .iter()
+        .map(|document| {
+            store.prepare(
+                Intent::Push {
+                    document: document.clone(),
+                },
+                Some(batch),
+            )
+        })
+        .collect::<Result<Vec<_>>>()?;
+    for (doc, op) in docs.iter().zip(&mut entries) {
+        push_recorded(store, notion, doc, op).await?;
+        println!("pushed {} (operation {}, batch {})", doc.id, op.id, batch);
+    }
+    Ok(())
+}
+
+async fn push_recorded(
+    store: &Store,
+    notion: &Notion,
+    doc: &Document,
+    operation: &mut Operation,
+) -> Result<()> {
+    let result = async {
     ensure!(!doc.incomplete && doc.sync_warnings.is_empty(),
         "cannot push {}: the last pull was incomplete; pull a complete snapshot before pushing; local edits preserved", doc.id);
     let remote = notion.retrieve(&doc.id).await?;
@@ -197,7 +254,8 @@ pub async fn push_document(store: &Store, notion: &Notion, doc: &Document) -> Re
         next.last_edited_time = remote.last_edited_time;
         next.title = remote.title;
         next.url = remote.url;
-        return store.save(&next, Some(&current));
+        store.save(&next, Some(&current))?;
+        return store.transition(operation, State::LocallySaved);
     }
     ensure!(
         remote.markdown == doc.baseline,
@@ -210,7 +268,11 @@ pub async fn push_document(store: &Store, notion: &Notion, doc: &Document) -> Re
         "local file {} changed during preflight; retry push",
         doc.id
     );
+    store.transition(operation, State::Sent)?;
     let canonical = notion.replace(&doc.id, &doc.markdown).await?;
+    operation.remote_id = Some(doc.id.clone());
+    operation.remote_body = Some(canonical.clone());
+    store.transition(operation, State::RemoteConfirmed)?;
     let current = store.get(&doc.id)?;
     let mut next = current.clone();
     next.baseline = canonical;
@@ -222,7 +284,71 @@ pub async fn push_document(store: &Store, notion: &Notion, doc: &Document) -> Re
     if next.markdown != next.baseline {
         eprintln!("{}: local Markdown differs from Notion's response; local file retained and still marked dirty", doc.id);
     }
-    store.save(&next, Some(&current))
+    store.save(&next, Some(&current))?;
+    store.transition(operation, State::LocallySaved)
+    }.await;
+    store.operation_result(operation, result)
+}
+
+pub async fn rename_page(
+    store: &Store,
+    notion: &Notion,
+    id: &str,
+    title: &str,
+) -> Result<crate::notion::PageInfo> {
+    let id = page_id(id)?;
+    crate::notion::validate_create(&CreateParent::Page(id.clone()), title, "")?;
+    let mut op = store.prepare(
+        Intent::Rename {
+            id,
+            title: title.to_owned(),
+        },
+        None,
+    )?;
+    let result = async {
+        store.transition(&mut op, State::Sent)?;
+        let info = notion
+            .rename(op.target().expect("rename target"), title)
+            .await?;
+        eprintln!("renamed {} {}", info.id, info.url);
+        op.remote_id = Some(info.id.clone());
+        store.transition(&mut op, State::RemoteConfirmed)?;
+        store.save_metadata(&info)?;
+        store.transition(&mut op, State::LocallySaved)?;
+        Ok(info)
+    }
+    .await;
+    store.operation_result(&mut op, result)
+}
+
+pub async fn move_page(
+    store: &Store,
+    notion: &Notion,
+    id: &str,
+    parent: &str,
+) -> Result<crate::notion::PageInfo> {
+    let id = page_id(id)?;
+    let parent = page_id(parent)?;
+    ensure!(id != parent, "a page cannot be its own parent");
+    let mut op = store.prepare(
+        Intent::Move {
+            id: id.clone(),
+            parent: parent.clone(),
+        },
+        None,
+    )?;
+    let result = async {
+        store.transition(&mut op, State::Sent)?;
+        let info = notion.move_page(&id, &parent).await?;
+        eprintln!("moved {} {}", info.id, info.url);
+        op.remote_id = Some(info.id.clone());
+        store.transition(&mut op, State::RemoteConfirmed)?;
+        store.save_metadata(&info)?;
+        store.transition(&mut op, State::LocallySaved)?;
+        Ok(info)
+    }
+    .await;
+    store.operation_result(&mut op, result)
 }
 
 pub fn read_markdown(source: &Path) -> Result<String> {
